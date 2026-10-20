@@ -1,0 +1,15 @@
+{
+  "baseline": "blocked",
+  "project": "blocked",
+  "localGuards": "inactive",
+  "controller": "inactive",
+  "hostedCI": "inactive",
+  "hostedReviewer": "inactive",
+  "projectReconciler": "inactive",
+  "release": "inactive",
+  "developRenewal": "inactive",
+  "ordinaryIntegration": "blocked",
+  "setupBypass": "not-configured",
+  "paidReviewApproved": false,
+  "releaseIdentityApproved": false
+}

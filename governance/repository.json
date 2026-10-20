@@ -1,0 +1,21 @@
+{
+  "host": "github.com",
+  "owner": "glyad",
+  "name": "github-workspace-manager",
+  "fullName": "glyad/github-workspace-manager",
+  "description": "Portable AI-assisted GitHub provisioning and configuration management",
+  "visibility": "public",
+  "protocol": "https",
+  "destination": "/Users/davidkossoglyad/Documents/GitHub/glyad/github-workspace-manager",
+  "defaultBranch": "main",
+  "developmentBranch": "develop",
+  "projectTitle": "GitHub Workspace Manager",
+  "mergeAuthority": "glyad",
+  "signedCommitsRequired": true,
+  "allowMergeCommit": true,
+  "allowSquashMerge": false,
+  "allowRebaseMerge": false,
+  "allowAutoMerge": false,
+  "deleteBranchOnMerge": false,
+  "allowForcePush": false
+}
