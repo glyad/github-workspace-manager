@@ -1,0 +1,29 @@
+{
+  "name": "github-workspace-manager",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Portable AI-assisted GitHub provisioning and configuration management",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/glyad/github-workspace-manager.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": "24.19.0",
+    "npm": "11.21.1"
+  },
+  "packageManager": "npm@11.21.1",
+  "workspaces": [],
+  "scripts": {
+    "test:governance": "node --test tests/governance/*.test.mjs",
+    "lint": "eslint tools/governance tests/governance eslint.config.mjs",
+    "format:check": "prettier --check tools/governance/baseline.mjs tools/governance/check-files.mjs tests/governance/baseline.test.mjs eslint.config.mjs package.json .prettierrc.json .github/PULL_REQUEST_TEMPLATE.md README.md CONTRIBUTING.md CHANGELOG.md SECURITY.md SUPPORT.md CODE_OF_CONDUCT.md BACKLOG.md AGENTS.md docs/adr && prettier --parser json --check \".github/ISSUE_TEMPLATE/*.yml\"",
+    "check:files": "node tools/governance/check-files.mjs",
+    "check:local": "npm run test:governance && npm run lint && npm run format:check && npm run check:files"
+  },
+  "devDependencies": {
+    "eslint": "10.13.0",
+    "prettier": "3.9.10"
+  }
+}

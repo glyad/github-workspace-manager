@@ -1,0 +1,54 @@
+{
+  "name": "Version umbrella",
+  "description": "Propose version umbrella work with explicit acceptance and version mapping",
+  "body": [
+    {
+      "type": "markdown",
+      "attributes": {
+        "value": "Keep secrets and private reports out of Issues. Body links do not configure native relationships."
+      }
+    },
+    {
+      "type": "textarea",
+      "id": "scope",
+      "attributes": {
+        "label": "Scope and context"
+      },
+      "validations": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "id": "acceptance",
+      "attributes": {
+        "label": "Acceptance criteria"
+      },
+      "validations": {
+        "required": true
+      }
+    },
+    {
+      "type": "textarea",
+      "id": "dependencies",
+      "attributes": {
+        "label": "Dependencies and linked work",
+        "description": "Link Issues, sub-issues, and PRs. State none when applicable."
+      },
+      "validations": {
+        "required": true
+      }
+    },
+    {
+      "type": "input",
+      "id": "version",
+      "attributes": {
+        "label": "Proposed version and milestone",
+        "description": "Native milestone assignment is authoritative; maintainer approval required."
+      },
+      "validations": {
+        "required": true
+      }
+    }
+  ]
+}

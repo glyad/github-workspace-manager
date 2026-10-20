@@ -1,0 +1,15 @@
+{
+  "blank_issues_enabled": false,
+  "contact_links": [
+    {
+      "name": "Questions and design",
+      "url": "https://github.com/glyad/github-workspace-manager/discussions",
+      "about": "Use Discussions for questions and design."
+    },
+    {
+      "name": "Private vulnerability report",
+      "url": "mailto:david@logoui.co.il",
+      "about": "Report vulnerabilities privately; do not open a public Issue."
+    }
+  ]
+}
