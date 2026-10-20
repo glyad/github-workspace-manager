@@ -524,6 +524,7 @@ export function createBaselineGitHubPort({ root, actorId, execute = execFileSync
         allow_auto_merge: false,
         delete_branch_on_merge: false,
         merge_commit_title: 'PR_TITLE',
+        merge_commit_message: 'PR_BODY',
       };
       if (
         r.status !== 200 ||
@@ -607,6 +608,7 @@ export function createBaselineGitHubPort({ root, actorId, execute = execFileSync
         allow_auto_merge: false,
         delete_branch_on_merge: false,
         merge_commit_title: 'PR_TITLE',
+        merge_commit_message: 'PR_BODY',
       });
       return failure('Settings require independent observation');
     },

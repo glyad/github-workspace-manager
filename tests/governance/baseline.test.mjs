@@ -246,6 +246,7 @@ async function observedBaselineWith(extra = [], settingsOverride = {}) {
   await writeFile(join(root, 'README.md'), 'frozen');
   const settings = {
     description: 'Portable AI-assisted GitHub provisioning and configuration management',
+    merge_commit_message: 'PR_BODY',
     has_projects: true,
     ...settingsOverride,
     node_id: 'R_1',
@@ -535,4 +536,35 @@ test('preflight authorizes Projects only after sending the accepted GraphQL requ
   assert.equal(result.value.project.scopeVerified, true);
   assert.deepEqual(result.value.project.matches, []);
   assert.equal(queryAccepted, true);
+});
+test('repository settings request supplies the backend-compatible PR title and body pair', async () => {
+  let accepted = false;
+  const port = baseline.createBaselineGitHubPort({
+    root: await temp(),
+    actorId,
+    execute: (binary, args, options) => {
+      assert.equal(args[6], 'PATCH');
+      const body = JSON.parse(options.input);
+      if (body.merge_commit_title !== 'PR_TITLE' || body.merge_commit_message !== 'PR_BODY') {
+        const error = Error('GitHub rejected invalid_merge_commit_setting_combo');
+        error.stdout =
+          'HTTP/2.0 422 Unprocessable Entity\r\n\r\n' +
+          JSON.stringify({
+            message: 'Validation Failed',
+            errors: [{ code: 'invalid', field: 'merge_commit_allowed' }],
+          });
+        throw error;
+      }
+      accepted = true;
+      return 'HTTP/2.0 200 OK\r\n\r\n{}';
+    },
+  });
+  await port.applySettings();
+  assert.equal(accepted, true);
+});
+test('remote baseline rejects incompatible merge message even when title matches', async () => {
+  assert.equal(
+    (await observedBaselineWith([], { merge_commit_message: 'PR_TITLE' })).kind,
+    'blocked',
+  );
 });
