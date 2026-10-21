@@ -11,5 +11,11 @@
   "ordinaryIntegration": "blocked",
   "setupBypass": "not-configured",
   "paidReviewApproved": false,
-  "releaseIdentityApproved": false
+  "releaseIdentityApproved": false,
+  "baselineRestoration": "unverified",
+  "codeScanning": "pending-meaningful-run",
+  "releaseBypass": "inactive",
+  "renewalBypass": "inactive",
+  "ordinaryDraftWork": "blocked-until-verified-closure",
+  "actionsExecution": "disabled-until-trusted-admission"
 }

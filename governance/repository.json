@@ -17,5 +17,37 @@
   "allowRebaseMerge": false,
   "allowAutoMerge": false,
   "deleteBranchOnMerge": false,
-  "allowForcePush": false
+  "allowForcePush": false,
+  "baselineProtectionPolicy": {
+    "main": ["required_signatures", "non_fast_forward", "deletion"],
+    "develop": [
+      "required_signatures",
+      "non_fast_forward",
+      "deletion",
+      "pull_request",
+      "resolved_conversations",
+      "update_denial_until_real_gates"
+    ],
+    "mainPullRequestRequired": false,
+    "linearHistoryRequired": false,
+    "humanApprovalCount": 0,
+    "bypassActors": []
+  },
+  "securityPolicy": {
+    "vulnerabilityAlerts": "enable-free-available",
+    "secretScanning": "enable-free-available",
+    "pushProtection": "enable-free-available",
+    "privateVulnerabilityReporting": "enable-free-available",
+    "codeScanning": "pending-trusted-admission-and-meaningful-run",
+    "dependencyUpdateAutomation": "deferred"
+  },
+  "actionsPolicy": {
+    "defaultWorkflowPermissions": "read",
+    "canApprovePullRequestReviews": false,
+    "allowedActions": "selected",
+    "patternsAllowed": [],
+    "shaPinningRequired": true,
+    "forkExecutionAdmitted": false,
+    "enabled": false
+  }
 }

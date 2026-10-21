@@ -8,6 +8,7 @@
 - [Uncertain creation and restoration](#uncertain-creation-and-restoration)
 - [Evidence identity](#evidence-identity)
 - [Verification and remaining gates](#verification-and-remaining-gates)
+- [Final protection handoff](#final-protection-handoff)
 
 ## Authority and current state
 
@@ -159,3 +160,17 @@ Task 1 remains locally prepared and blocked on actual preflight/signing
 verification. No commit is possible until Task 2 creates the signed repository.
 Hosted review funding/credentials, local guards, controller trust, release
 identity and renewal permissions remain separate later activation gates.
+
+## Final protection handoff
+
+Follow the [security runbook](security-runbook.md) for the Task 4 bounded REST
+adapter, selected safeguards and final baseline observer. Finish all signed
+setup commits and synchronize develop with final main before installing the
+empty-bypass deny-update gate. Verify restoration with the final exact SHAs,
+then close through the authenticated Task 1 journal and bound remote setup
+ledger. Final verification requires both closure readbacks; no main reopening
+is needed to log closure. Repository Actions remain disabled until the trusted
+Tasks 6–7 admission path is verified; an empty external-action allowlist does not
+block raw-run/local-action jobs by itself. Local checks require a clean
+index/worktree and stable HEAD before and after execution. Code scanning's meaningful run and hosted
+reviewer/release/renewal activation remain explicit pending gates.
