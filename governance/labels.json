@@ -1,0 +1,76 @@
+{
+  "formatVersion": 1,
+  "preserveUnmanaged": true,
+  "labels": [
+    {
+      "name": "type:feature",
+      "color": "0969DA",
+      "description": "Feature work"
+    },
+    {
+      "name": "type:fix",
+      "color": "CF222E",
+      "description": "Bug correction"
+    },
+    {
+      "name": "type:chore",
+      "color": "57606A",
+      "description": "Repository maintenance"
+    },
+    {
+      "name": "type:docs",
+      "color": "8250DF",
+      "description": "Documentation work"
+    },
+    {
+      "name": "type:hotfix",
+      "color": "9A6700",
+      "description": "Published-version hotfix"
+    },
+    {
+      "name": "area:core",
+      "color": "DDF4FF",
+      "description": "Portable core and application"
+    },
+    {
+      "name": "area:github",
+      "color": "EAEFF2",
+      "description": "GitHub integrations"
+    },
+    {
+      "name": "area:ui",
+      "color": "FBEFFF",
+      "description": "User interface"
+    },
+    {
+      "name": "area:security",
+      "color": "FFF1E5",
+      "description": "Security and credentials"
+    },
+    {
+      "name": "area:release",
+      "color": "DAFBE1",
+      "description": "Packaging and release"
+    },
+    {
+      "name": "blocked",
+      "color": "B62324",
+      "description": "Blocked by unresolved work"
+    },
+    {
+      "name": "needs-decision",
+      "color": "9A6700",
+      "description": "Product-owner decision required"
+    },
+    {
+      "name": "good first issue",
+      "color": "7057FF",
+      "description": "Suitable for a first contribution"
+    },
+    {
+      "name": "help wanted",
+      "color": "008672",
+      "description": "Contributions welcome"
+    }
+  ]
+}

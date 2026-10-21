@@ -1,0 +1,232 @@
+{
+  "formatVersion": 1,
+  "owner": "glyad",
+  "repositoryId": "R_kgDOVRTNvA",
+  "repository": "glyad/github-workspace-manager",
+  "title": "GitHub Workspace Manager",
+  "public": true,
+  "milestone": "v0.1.0",
+  "nativeIssueTypes": false,
+  "nativeIssueTypeLimitation": "Issue types are organization managed; this personal repository uses approved type labels.",
+  "fields": {
+    "Status": ["Backlog", "Planned", "In progress", "In review", "Integrated", "Released"],
+    "Priority": ["P0", "P1", "P2", "P3"],
+    "Size": ["XS", "S", "M", "L", "XL"]
+  },
+  "colors": {
+    "Status": ["GRAY", "BLUE", "YELLOW", "ORANGE", "PURPLE", "GREEN"],
+    "Priority": ["RED", "ORANGE", "YELLOW", "BLUE"],
+    "Size": ["GRAY", "BLUE", "GREEN", "YELLOW", "PURPLE"]
+  },
+  "views": [
+    {
+      "name": "Status",
+      "layout": "BOARD_LAYOUT",
+      "filter": "",
+      "groupBy": "Status"
+    },
+    {
+      "name": "Planning by milestone",
+      "layout": "TABLE_LAYOUT",
+      "filter": "",
+      "groupBy": "Milestone"
+    },
+    {
+      "name": "Current release",
+      "layout": "TABLE_LAYOUT",
+      "filter": "milestone:\"v0.1.0\""
+    },
+    {
+      "name": "Future releases",
+      "layout": "TABLE_LAYOUT",
+      "filter": "has:milestone -milestone:\"v0.1.0\""
+    },
+    {
+      "name": "Triage",
+      "layout": "TABLE_LAYOUT",
+      "filter": "no:milestone OR no:priority OR no:size"
+    }
+  ],
+  "native": {
+    "projectId": "PVT_kwHOAECrfc4Bn_FB",
+    "number": 2,
+    "url": "https://github.com/users/glyad/projects/2",
+    "repositoryId": "R_kgDOVRTNvA",
+    "milestoneId": "MI_kwDOVRTNvM4BHlUq",
+    "fields": {
+      "Status": {
+        "id": "PVTSSF_lAHOAECrfc4Bn_FBzhmhMSw",
+        "options": [
+          {
+            "id": "d03c71af",
+            "name": "Backlog",
+            "color": "GRAY",
+            "description": "Backlog"
+          },
+          {
+            "id": "d5d653fb",
+            "name": "Planned",
+            "color": "BLUE",
+            "description": "Planned"
+          },
+          {
+            "id": "ea351b8e",
+            "name": "In progress",
+            "color": "YELLOW",
+            "description": "In progress"
+          },
+          {
+            "id": "9f73b175",
+            "name": "In review",
+            "color": "ORANGE",
+            "description": "In review"
+          },
+          {
+            "id": "1579b818",
+            "name": "Integrated",
+            "color": "PURPLE",
+            "description": "Integrated"
+          },
+          {
+            "id": "7441b40b",
+            "name": "Released",
+            "color": "GREEN",
+            "description": "Released"
+          }
+        ]
+      },
+      "Priority": {
+        "id": "PVTSSF_lAHOAECrfc4Bn_FBzhmhMWk",
+        "options": [
+          {
+            "id": "5cc7abb6",
+            "name": "P0",
+            "color": "RED",
+            "description": "P0"
+          },
+          {
+            "id": "e4d5fd5a",
+            "name": "P1",
+            "color": "ORANGE",
+            "description": "P1"
+          },
+          {
+            "id": "10d2a32e",
+            "name": "P2",
+            "color": "YELLOW",
+            "description": "P2"
+          },
+          {
+            "id": "9e2a412e",
+            "name": "P3",
+            "color": "BLUE",
+            "description": "P3"
+          }
+        ]
+      },
+      "Size": {
+        "id": "PVTSSF_lAHOAECrfc4Bn_FBzhmhMaI",
+        "options": [
+          {
+            "id": "33085b40",
+            "name": "XS",
+            "color": "GRAY",
+            "description": "XS"
+          },
+          {
+            "id": "bd22cf24",
+            "name": "S",
+            "color": "BLUE",
+            "description": "S"
+          },
+          {
+            "id": "58328d15",
+            "name": "M",
+            "color": "GREEN",
+            "description": "M"
+          },
+          {
+            "id": "fb1c979a",
+            "name": "L",
+            "color": "YELLOW",
+            "description": "L"
+          },
+          {
+            "id": "c2c459f1",
+            "name": "XL",
+            "color": "PURPLE",
+            "description": "XL"
+          }
+        ]
+      }
+    },
+    "views": {
+      "Status": {
+        "id": "PVTV_lAHOAECrfc4Bn_FBzgMKPyA",
+        "number": 2,
+        "layout": "BOARD_LAYOUT",
+        "filter": "",
+        "groupByFieldIds": [],
+        "verticalGroupByFieldIds": ["PVTSSF_lAHOAECrfc4Bn_FBzhmhMSw"]
+      },
+      "Planning by milestone": {
+        "id": "PVTV_lAHOAECrfc4Bn_FBzgMKPyc",
+        "number": 3,
+        "layout": "TABLE_LAYOUT",
+        "filter": "",
+        "groupByFieldIds": ["PVTF_lAHOAECrfc4Bn_FBzhmhMS8"],
+        "verticalGroupByFieldIds": []
+      },
+      "Current release": {
+        "id": "PVTV_lAHOAECrfc4Bn_FBzgMKPy0",
+        "number": 4,
+        "layout": "TABLE_LAYOUT",
+        "filter": "milestone:\"v0.1.0\"",
+        "groupByFieldIds": [],
+        "verticalGroupByFieldIds": []
+      },
+      "Future releases": {
+        "id": "PVTV_lAHOAECrfc4Bn_FBzgMKPy8",
+        "number": 5,
+        "layout": "TABLE_LAYOUT",
+        "filter": "has:milestone -milestone:\"v0.1.0\"",
+        "groupByFieldIds": [],
+        "verticalGroupByFieldIds": []
+      },
+      "Triage": {
+        "id": "PVTV_lAHOAECrfc4Bn_FBzgMKPzI",
+        "number": 6,
+        "layout": "TABLE_LAYOUT",
+        "filter": "no:milestone OR no:priority OR no:size",
+        "groupByFieldIds": [],
+        "verticalGroupByFieldIds": []
+      }
+    }
+  },
+  "verification": {
+    "observedAt": "2026-10-21T06:30:28.792895+00:00",
+    "public": true,
+    "repositoryLinked": true,
+    "itemCount": 48,
+    "statusCounts": {
+      "Planned": 36,
+      "Backlog": 12
+    },
+    "priorityAndSizeUnselected": true,
+    "nativeParentLinksVerified": 24,
+    "nativeDependenciesVerified": 141,
+    "savedStatusBoardGrouping": "Status",
+    "savedPlanningTableGrouping": "Milestone",
+    "savedTriageFilter": "no:milestone OR no:priority OR no:size",
+    "triageNativeControls": "Root verified explicit OR with missing-milestone and populated-Status controls; canonical saved view and API readback agree.",
+    "triageDocumentationLimitation": "Current native UI supports explicit OR despite the official filtering documentation stating cross-field OR is unsupported.",
+    "nativeDefaultViewPreserved": {
+      "id": "PVTV_lAHOAECrfc4Bn_FBzgMKOrQ",
+      "number": 1
+    },
+    "nativeDefaultWorkflow": "Root observed one enabled native default workflow; left unchanged. Custom governance automation remains inactive.",
+    "labelDarkMode": "Root visually verified readable; screenshot task-3-labels-dark.png",
+    "labelLightMode": "Pending root visual verification",
+    "ordinaryWorkAllowed": false
+  }
+}
