@@ -170,7 +170,12 @@ empty-bypass deny-update gate. Verify restoration with the final exact SHAs,
 then close through the authenticated Task 1 journal and bound remote setup
 ledger. Final verification requires both closure readbacks; no main reopening
 is needed to log closure. Repository Actions remain disabled until the trusted
-Tasks 6–7 admission path is verified; an empty external-action allowlist does not
+Tasks 6–7 admission path is verified. If disabled GitHub readback omits the
+selected policy or pinning is false, report allowlist/pinning pending activation
+without claiming those controls verified. Task 7 must configure and read back
+selected reviewed pinned Actions and SHA pinning before ANY enablement; an API
+that requires enablement first blocks activation until a safe supported path is
+reviewed. Never temporarily enable Actions during baseline setup. An empty external-action allowlist does not
 block raw-run/local-action jobs by itself. Local checks require a clean
 index/worktree and stable HEAD before and after execution. Code scanning's meaningful run and hosted
 reviewer/release/renewal activation remain explicit pending gates.

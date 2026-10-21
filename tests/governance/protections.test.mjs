@@ -282,9 +282,9 @@ const badCases = [
     },
   ],
   [
-    'unrestricted Actions',
+    'enabled Actions',
     (v) => {
-      v.actions.githubOwnedAllowed = true;
+      v.actions.enabled = true;
     },
   ],
   [
@@ -416,7 +416,7 @@ function githubFixture() {
         if (state.applyWrites) {
           if (path.endsWith('/actions/permissions')) {
             state.actionsEnabled = body.enabled;
-            state.allowedActions = body.allowed_actions;
+            if (body.allowed_actions !== undefined) state.allowedActions = body.allowed_actions;
           }
           if (path.endsWith('/vulnerability-alerts')) state.alertsEnabled = true;
           if (path.endsWith('/private-vulnerability-reporting')) state.reportsEnabled = true;
@@ -460,8 +460,10 @@ function githubFixture() {
     } else if (path.endsWith('/actions/permissions'))
       value = {
         enabled: state.actionsEnabled !== false,
-        allowed_actions: state.allowedActions ?? 'selected',
-        sha_pinning_required: true,
+        ...(state.disabledPolicyOmitted && state.actionsEnabled === false
+          ? {}
+          : { allowed_actions: state.allowedActions ?? 'selected' }),
+        sha_pinning_required: state.disabledPolicyOmitted ? false : true,
       };
     else if (path.endsWith('/actions/workflows?per_page=100'))
       value = { total_count: state.workflows?.length ?? 0, workflows: state.workflows ?? [] };
@@ -548,7 +550,11 @@ test('real adapter emits bounded rules/security/Actions mutations and reconciles
   assert.equal(rules.length, 2);
   assert.ok(rules.every((row) => row.body.bypass_actors.length === 0));
   assert.ok(f.state.mutations.some((row) => row.body?.default_workflow_permissions === 'read'));
-  assert.ok(f.state.mutations.some((row) => row.body?.allowed_actions === 'selected'));
+  assert.deepEqual(
+    f.state.mutations.find((row) => row.path.endsWith('/actions/permissions')).body,
+    { enabled: false },
+  );
+  assert.ok(!f.state.mutations.some((row) => row.path.endsWith('/selected-actions')));
 });
 
 function baselineCallbacks() {
@@ -778,7 +784,7 @@ test('selected-actions 409 remains a blocked observation when selected policy is
   });
   assert.equal((await port.observeControls()).kind, 'blocked');
 });
-test('restore from all-actions policy still requires configured selected allowlist readback', async () => {
+test('restore from all-actions policy disables execution and defers selected policy until activation', async () => {
   const f = githubFixture();
   f.state.allowedActions = 'all';
   f.state.applyWrites = true;
@@ -791,10 +797,11 @@ test('restore from all-actions policy still requires configured selected allowli
   assert.equal(before.kind, 'verified');
   const after = await port.restoreBaselineControls(before.value.revision);
   assert.equal(after.kind, 'verified');
-  assert.equal(after.value.actions.allowedActions, 'selected');
-  assert.equal(after.value.actions.allowlistConfigured, true);
-  assert.deepEqual(after.value.actions.patternsAllowed, []);
-  assert.ok(f.state.requests.some((path) => path.endsWith('/selected-actions')));
+  assert.equal(after.value.actions.enabled, false);
+  assert.equal(after.value.actions.allowedActions, 'all');
+  assert.equal(after.value.actions.allowlistConfigured, false);
+  assert.equal(after.value.actions.patternsAllowed, null);
+  assert.ok(!f.state.requests.some((path) => path.endsWith('/selected-actions')));
 });
 
 test('restoration exposes exact failed operation and enum-only HTTP classification with durable operation callback', async () => {
@@ -1032,7 +1039,7 @@ test('malformed successful final observation returns blocked after acknowledged 
   const before = await port.observeControls();
   const result = await port.restoreBaselineControls(before.value.revision);
   assert.equal(result.kind, 'blocked');
-  assert.equal(f.state.mutations.length, 8);
+  assert.equal(f.state.mutations.length, 7);
   assert.ok(!JSON.stringify(result).includes('sensitive-payload-canary'));
 });
 
@@ -1060,4 +1067,138 @@ test('malformed failed write body retains known HTTP status and safe enum receip
   assert.equal(result.completedOperations.length, 2);
   assert.equal(f.state.mutations.length, 2);
   assert.ok(!JSON.stringify(result).includes('sensitive-payload-canary'));
+});
+
+test('actual disabled Actions GET omission is observed without inventing selected or pinning', async () => {
+  const f = githubFixture();
+  f.state.actionsEnabled = false;
+  f.state.disabledPolicyOmitted = true;
+  const port = createProtectionGitHubPort({
+    actorId: 'U_owner',
+    repositoryId: 'R_repo',
+    execute: f.execute,
+  });
+  const result = await port.observeControls();
+  assert.equal(result.kind, 'verified');
+  assert.equal(result.value.actions.allowedActions, null);
+  assert.equal(result.value.actions.shaPinningRequired, false);
+  assert.equal(result.value.actions.allowlistConfigured, false);
+  assert.equal(result.value.actions.patternsAllowed, null);
+  assert.ok(!f.state.requests.some((path) => path.endsWith('/selected-actions')));
+  const value = observation();
+  value.actions = result.value.actions;
+  const baseline = await verifyBaseline(portFor(value), expected);
+  assert.equal(baseline.kind, 'verified');
+  assert.equal(baseline.value.ordinaryDraftWorkAllowed, true);
+  assert.equal(baseline.value.ordinaryIntegrationAllowed, false);
+  assert.equal(baseline.value.releaseAllowed, false);
+  assert.equal(baseline.value.actionsActivationAllowed, false);
+  assert.equal(baseline.value.components.actions.status, 'verified');
+  assert.equal(baseline.value.components.actionsPolicy.status, 'pending-activation');
+});
+
+test('actual disabled API rejects combined policy payload; restoration uses disable-only and reports deferred gate', async () => {
+  const f = githubFixture();
+  f.state.applyWrites = true;
+  f.state.disabledPolicyOmitted = true;
+  const execute = (binary, argv, options) => {
+    if (
+      argv.includes('PUT') &&
+      argv.at(-1).endsWith('/actions/permissions') &&
+      JSON.stringify(JSON.parse(options.input)) !== JSON.stringify({ enabled: false })
+    )
+      return { ok: false, stdout: 'HTTP/2.0 409 Conflict\r\n\r\n{}' };
+    return f.execute(binary, argv, options);
+  };
+  const port = createProtectionGitHubPort({ actorId: 'U_owner', repositoryId: 'R_repo', execute });
+  const before = await port.observeControls();
+  const after = await port.restoreBaselineControls(before.value.revision);
+  assert.equal(after.kind, 'verified');
+  assert.equal(after.value.actions.enabled, false);
+  assert.equal(after.value.actions.allowedActions, null);
+  assert.equal(after.value.actions.shaPinningRequired, false);
+  assert.equal(after.value.actions.policyStatus, 'pending-activation');
+  assert.ok(f.state.mutations.every((row) => row.body?.enabled !== true));
+  assert.ok(!f.state.mutations.some((row) => row.path.endsWith('/selected-actions')));
+});
+
+for (const body of [
+  { enabled: true, sha_pinning_required: false },
+  { enabled: false, allowed_actions: null, sha_pinning_required: false },
+  { enabled: false, allowed_actions: 'unknown', sha_pinning_required: false },
+  { enabled: false },
+  { enabled: 'false', sha_pinning_required: false },
+  { enabled: false, sha_pinning_required: 'false' },
+])
+  test(`malformed or active incomplete Actions policy blocks: ${JSON.stringify(body)}`, async () => {
+    const f = githubFixture();
+    const execute = (binary, argv, options) =>
+      argv.includes('GET') && argv.at(-1).endsWith('/actions/permissions')
+        ? { ok: true, stdout: `HTTP/2.0 200 OK\r\n\r\n${JSON.stringify(body)}` }
+        : f.execute(binary, argv, options);
+    const port = createProtectionGitHubPort({
+      actorId: 'U_owner',
+      repositoryId: 'R_repo',
+      execute,
+    });
+    assert.equal((await port.observeControls()).kind, 'blocked');
+    assert.equal(f.state.mutations.length, 0);
+  });
+
+for (const [name, mutate] of [
+  [
+    'execution enabled',
+    (a) => {
+      a.enabled = true;
+    },
+  ],
+  [
+    'execution unknown',
+    (a) => {
+      delete a.enabled;
+    },
+  ],
+  [
+    'unknown policy',
+    (a) => {
+      a.allowedActions = 'unknown';
+    },
+  ],
+  [
+    'missing pinning observation',
+    (a) => {
+      delete a.shaPinningRequired;
+    },
+  ],
+  [
+    'missing selected list',
+    (a) => {
+      a.patternsAllowed = null;
+    },
+  ],
+])
+  test(`baseline rejects ${name} even with closed session`, async () => {
+    const value = observation();
+    mutate(value.actions);
+    assert.equal((await verifyBaseline(portFor(value), expected)).kind, 'blocked');
+  });
+
+test('disabled pending policy never bypasses closure or restoration phase admission', async () => {
+  const value = observation();
+  Object.assign(value.actions, {
+    allowedActions: null,
+    allowlistConfigured: false,
+    githubOwnedAllowed: null,
+    verifiedAllowed: null,
+    patternsAllowed: null,
+    shaPinningRequired: false,
+  });
+  value.session.state = 'open';
+  const final = await verifyBaseline(portFor(value), expected);
+  assert.equal(final.kind, 'blocked');
+  assert.equal(final.value.ordinaryDraftWorkAllowed, false);
+  const restoration = await verifyBaseline(portFor(value), { ...expected, phase: 'restoration' });
+  assert.equal(restoration.kind, 'verified');
+  assert.equal(restoration.value.ordinaryDraftWorkAllowed, false);
+  assert.equal(restoration.value.components.actionsPolicy.status, 'pending-activation');
 });

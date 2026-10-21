@@ -20,6 +20,7 @@ export async function verifyBaseline(port, expected) {
     ordinaryDraftWorkAllowed: false,
     ordinaryIntegrationAllowed: false,
     releaseAllowed: false,
+    actionsActivationAllowed: false,
     enforcementBoundary:
       'Native rules cannot restrict every main direct push to a develop source. Maintainer-authorized release adapter ancestry/tree checks remain required; release automation is inactive.',
   };
@@ -175,21 +176,47 @@ export async function verifyBaseline(port, expected) {
     'Retain inactive reviewer/release/renewal and blocked integration',
   );
   const actions = v?.actions;
+  // Disabled execution is the baseline admission gate. An omitted policy is
+  // observed as null, never as a selected allowlist or verified SHA pinning.
+  const policyShapeValid =
+    typeof actions?.shaPinningRequired === 'boolean' &&
+    (actions.allowedActions === 'selected'
+      ? typeof actions.githubOwnedAllowed === 'boolean' &&
+        typeof actions.verifiedAllowed === 'boolean' &&
+        Array.isArray(actions.patternsAllowed) &&
+        actions.patternsAllowed.every((pattern) => typeof pattern === 'string')
+      : ['all', 'local_only', null].includes(actions.allowedActions) &&
+        actions.allowlistConfigured === false &&
+        actions.githubOwnedAllowed === null &&
+        actions.verifiedAllowed === null &&
+        actions.patternsAllowed === null);
   add(
     'actions',
     actions?.enabled === false &&
       actions.defaultWorkflowPermissions === 'read' &&
       actions.canApprovePullRequestReviews === false &&
-      actions.allowedActions === 'selected' &&
-      actions.githubOwnedAllowed === false &&
-      actions.verifiedAllowed === false &&
-      Array.isArray(actions.patternsAllowed) &&
-      actions.patternsAllowed.length === 0 &&
-      actions.shaPinningRequired === true &&
+      policyShapeValid &&
       actions.forkExecutionAdmitted === false,
-    'Actions least privilege, empty selected allowlist or fork admission unverified',
-    'Read back read-only defaults, selected empty allowlist and SHA pinning; admit reviewed required pinned actions later',
+    'Actions execution disablement, least privilege or policy observation unverified',
+    'Read back disabled execution, read-only defaults, no PR approval and a typed policy observation',
   );
+  const policyVerified =
+    policyShapeValid &&
+    actions.allowedActions === 'selected' &&
+    actions.githubOwnedAllowed === false &&
+    actions.verifiedAllowed === false &&
+    actions.patternsAllowed.length === 0 &&
+    actions.shaPinningRequired === true;
+  components.actionsPolicy = {
+    status: policyVerified ? 'verified' : 'pending-activation',
+    observed: {
+      allowedActions: actions?.allowedActions ?? null,
+      shaPinningRequired: actions?.shaPinningRequired ?? null,
+      allowlistConfigured: actions?.allowlistConfigured ?? actions?.allowedActions === 'selected',
+    },
+    nextGate:
+      'Task 7 must configure and read back selected reviewed required immutable Actions and SHA pinning before ANY execution enablement; never temporarily enable during baseline setup',
+  };
   for (const name of [
     'vulnerabilityAlerts',
     'secretScanning',

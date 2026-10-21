@@ -231,7 +231,8 @@ export function createProtectionGitHubPort({
       !isObject(actions.value) ||
       typeof actions.value.enabled !== 'boolean' ||
       typeof actions.value.sha_pinning_required !== 'boolean' ||
-      !['all', 'local_only', 'selected'].includes(actions.value.allowed_actions)
+      (!['all', 'local_only', 'selected'].includes(actions.value.allowed_actions) &&
+        !(actions.value.enabled === false && actions.value.allowed_actions === undefined))
     )
       return blocked('Actions policy observation incomplete', evidence());
     // This endpoint applies only after selected policy is configured. Never
@@ -313,13 +314,23 @@ export function createProtectionGitHubPort({
         enabled: actions.value.enabled,
         defaultWorkflowPermissions: workflow.value.default_workflow_permissions,
         canApprovePullRequestReviews: workflow.value.can_approve_pull_request_reviews,
-        allowedActions: actions.value.allowed_actions,
+        allowedActions: actions.value.allowed_actions ?? null,
         shaPinningRequired: actions.value.sha_pinning_required,
         allowlistConfigured: selected.notConfigured !== true,
         githubOwnedAllowed: selected.value?.github_owned_allowed ?? null,
         verifiedAllowed: selected.value?.verified_allowed ?? null,
         patternsAllowed: selected.notConfigured ? null : (selected.value?.patterns_allowed ?? []),
         forkExecutionAdmitted: actions.value.enabled === false ? false : null,
+        policyStatus:
+          actions.value.allowed_actions === 'selected' &&
+          actions.value.sha_pinning_required === true &&
+          selected.value?.github_owned_allowed === false &&
+          selected.value?.verified_allowed === false &&
+          (selected.value.patterns_allowed ?? []).length === 0
+            ? 'verified'
+            : 'pending-activation',
+        policyNextGate:
+          'Task 7 must configure and verify selected reviewed immutable Actions and SHA pinning before any execution enablement; never temporarily enable during baseline setup',
       },
       codeScanning: {
         status: 'pending',
@@ -377,8 +388,10 @@ export function createProtectionGitHubPort({
         body: op.arguments,
       });
     }
-    // No required third-party Actions are needed before worker activation. Empty
-    // selected allowlist is narrower than an unverified or wildcard allowlist.
+    // GitHub's disabled repository API rejects the combined selected/pinning
+    // payload and may omit allowed_actions on readback. Keep execution disabled;
+    // policy/list/pinning configuration is a separate mandatory activation gate.
+    // Never enable Actions temporarily to configure it during baseline setup.
     mutations.push(
       {
         method: 'PUT',
@@ -388,12 +401,7 @@ export function createProtectionGitHubPort({
       {
         method: 'PUT',
         path: `${base}/actions/permissions`,
-        body: { enabled: false, allowed_actions: 'selected', sha_pinning_required: true },
-      },
-      {
-        method: 'PUT',
-        path: `${base}/actions/permissions/selected-actions`,
-        body: { github_owned_allowed: false, verified_allowed: false, patterns_allowed: [] },
+        body: { enabled: false },
       },
       { method: 'PUT', path: `${base}/vulnerability-alerts` },
       { method: 'PUT', path: `${base}/private-vulnerability-reporting` },
@@ -492,11 +500,6 @@ export function createProtectionGitHubPort({
       actions.enabled === false &&
       actions.defaultWorkflowPermissions === 'read' &&
       actions.canApprovePullRequestReviews === false &&
-      actions.allowedActions === 'selected' &&
-      actions.shaPinningRequired === true &&
-      actions.githubOwnedAllowed === false &&
-      actions.verifiedAllowed === false &&
-      actions.patternsAllowed.length === 0 &&
       actions.forkExecutionAdmitted === false;
     return rulesOkay && settingsOkay
       ? after

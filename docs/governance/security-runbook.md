@@ -42,8 +42,10 @@ created. It provides:
    snapshot digest against persisted setup intent; create/update only the two
    named `governance-baseline-main`/`governance-baseline-develop` rulesets with no
    bypass; enable selected security settings; set Actions read-only defaults,
-   no PR approval permission, SHA pinning and a selected empty allowlist, while
-   keeping repository Actions disabled until Tasks 6–7 admission is verified.
+   no PR approval permission and repository Actions disabled. Selected allowlist
+   and SHA pinning remain explicit pending activation gates if unconfigured;
+   baseline restoration sends only `{enabled:false}` to repository permissions
+   and never writes the selected list or temporarily enables execution.
 3. `observeRefs()`: actual main/develop SHAs plus GitHub signature verification
    from the exact commit endpoint.
 
@@ -59,9 +61,18 @@ do not cause false failures, while unknown or weakened parameters are rejected.
 
 The adapter uses the documented [repository rules API](https://docs.github.com/en/rest/repos/rules)
 and [Actions permissions API](https://docs.github.com/en/rest/actions/permissions).
-The allowlist is empty because baseline installs no hosted worker. Add only
-reviewed required Actions pinned to verified immutable commits during Task 7;
-no owner wildcard, marketplace-wide approval or mutable tag is selected.
+The desired activation policy starts with an empty selected allowlist because
+baseline installs no hosted worker. Actual GitHub readback while Actions are
+disabled may omit `allowed_actions` and report SHA pinning false; the combined
+disable/selected/pinning PUT returned HTTP 409 in the actual repository. Record
+that absent policy as null/unconfigured and pinning as observed, never as pass.
+A disabled baseline can close with this explicit pending policy gate after all
+other controls and closure are verified. Task 7 must configure and verify the
+selected allowlist, required Actions pinned to reviewed immutable commits, and
+SHA pinning **before ANY execution enablement**. If the API cannot establish
+that policy without enabling first, activation remains blocked pending a safe,
+separately reviewed supported path. Never temporarily enable Actions for setup.
+No owner wildcard, marketplace-wide approval or mutable tag is selected.
 The actual disabled Actions readback is the execution/fork gate, including raw
 `run:` jobs and local actions. Workflow count or the external-action allowlist
 alone cannot establish that gate.
@@ -145,8 +156,11 @@ update automation remains deferred. No product runtime is implemented here.
 
 The baseline report has `verified`, `blocked` or `unsupported` component status,
 observed repository identity, fresh source evidence, blockers and next gates.
-Code-scanning completion can remain pending in an otherwise verified restored
-baseline, and must appear explicitly in the handoff. Required hosted CI/review,
+Code-scanning completion and unconfigured Actions allowlist/pinning can remain
+explicitly pending in an otherwise verified disabled baseline. The report
+separates verified `actions` execution/default permissions from `actionsPolicy`
+(`verified` or `pending-activation`) and always denies activation authority. Both
+pending gates must appear in the handoff. Required hosted CI/review,
 release identity, funding/limits and renewal authority remain later gates.
 
 ## Recovery and enforcement boundary
