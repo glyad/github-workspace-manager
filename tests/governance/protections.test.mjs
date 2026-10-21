@@ -394,6 +394,11 @@ function githubFixture() {
     const path = argv.at(-1);
     let value,
       status = 200;
+    if (method !== 'GET' && path === state.failPath)
+      return {
+        ok: false,
+        stdout: `HTTP/2.0 ${state.failStatus ?? 403} Error\r\n\r\n${JSON.stringify({ message: 'sensitive-payload-canary' })}`,
+      };
     if (method !== 'GET') {
       const body = options.input ? JSON.parse(options.input) : undefined;
       state.mutations.push({ method, path, body });
@@ -472,6 +477,15 @@ function githubFixture() {
               ? { ...r, parameters: { update_allows_fetch_and_merge: false } }
               : r,
           ),
+      };
+    if (state.serverPRFields && value?.rules)
+      value = {
+        ...value,
+        rules: value.rules.map((r) =>
+          r.type === 'pull_request'
+            ? { ...r, parameters: { ...r.parameters, ...state.serverPRFields } }
+            : r,
+        ),
       };
     if (state.weaken && value?.rules)
       value = {
@@ -781,4 +795,269 @@ test('restore from all-actions policy still requires configured selected allowli
   assert.equal(after.value.actions.allowlistConfigured, true);
   assert.deepEqual(after.value.actions.patternsAllowed, []);
   assert.ok(f.state.requests.some((path) => path.endsWith('/selected-actions')));
+});
+
+test('restoration exposes exact failed operation and enum-only HTTP classification with durable operation callback', async () => {
+  const f = githubFixture();
+  f.state.failPath = 'repos/glyad/github-workspace-manager/actions/permissions/workflow';
+  const records = [];
+  const recordOperation = async (record) => {
+    records.push(structuredClone(record));
+    return { kind: 'verified', value: record, evidence: evidence() };
+  };
+  const port = createProtectionGitHubPort({
+    actorId: 'U_owner',
+    repositoryId: 'R_repo',
+    execute: f.execute,
+  });
+  const before = await port.observeControls();
+  const result = await port.restoreBaselineControls(before.value.revision, { recordOperation });
+  assert.equal(result.kind, 'uncertain');
+  assert.deepEqual(result.failedOperation, {
+    index: 2,
+    method: 'PUT',
+    path: 'repos/glyad/github-workspace-manager/actions/permissions/workflow',
+    httpStatus: 403,
+    classification: 'permission-denied',
+  });
+  assert.equal(records.length, 6);
+  assert.deepEqual(
+    records.map((r) => r.phase),
+    ['intent', 'result', 'intent', 'result', 'intent', 'result'],
+  );
+  assert.equal(records.at(-1).httpStatus, 403);
+  assert.ok(!JSON.stringify(result).includes('sensitive-payload-canary'));
+});
+test('operation journal denial prevents the corresponding remote attempt', async () => {
+  const f = githubFixture();
+  const port = createProtectionGitHubPort({
+    actorId: 'U_owner',
+    repositoryId: 'R_repo',
+    execute: f.execute,
+  });
+  const before = await port.observeControls();
+  const result = await port.restoreBaselineControls(before.value.revision, {
+    recordOperation: async () => ({ kind: 'blocked', reason: 'not durable', evidence: [] }),
+  });
+  assert.equal(result.kind, 'blocked');
+  assert.equal(f.state.mutations.length, 0);
+});
+test('adopted live ruleset IDs missing from observation never fall back to POST', async () => {
+  const f = githubFixture();
+  const port = createProtectionGitHubPort({
+    actorId: 'U_owner',
+    repositoryId: 'R_repo',
+    execute: f.execute,
+    managedRulesetIds: { main: 25528251, develop: 25528255 },
+  });
+  const before = await port.observeControls();
+  assert.equal((await port.restoreBaselineControls(before.value.revision)).kind, 'blocked');
+  assert.equal(f.state.mutations.length, 0);
+});
+test('failed durable result receipt stops later operations and preserves the attempted outcome', async () => {
+  const f = githubFixture();
+  const port = createProtectionGitHubPort({
+    actorId: 'U_owner',
+    repositoryId: 'R_repo',
+    execute: f.execute,
+  });
+  const before = await port.observeControls();
+  const recordOperation = async (record) =>
+    record.phase === 'result'
+      ? { kind: 'blocked', reason: 'disk unavailable', evidence: [] }
+      : { kind: 'verified', value: record, evidence: evidence() };
+  const result = await port.restoreBaselineControls(before.value.revision, { recordOperation });
+  assert.equal(result.kind, 'blocked');
+  assert.equal(f.state.mutations.length, 1);
+  assert.equal(result.failedOperation.index, 0);
+  assert.equal(result.failedOperation.httpStatus, 200);
+});
+test('observed adopted ruleset IDs are updated by PUT without duplicate creation', async () => {
+  const f = githubFixture();
+  f.state.applyWrites = true;
+  const initial = createProtectionGitHubPort({
+    actorId: 'U_owner',
+    repositoryId: 'R_repo',
+    execute: f.execute,
+  });
+  const before = await initial.observeControls();
+  assert.equal((await initial.restoreBaselineControls(before.value.revision)).kind, 'verified');
+  const offset = f.state.mutations.length;
+  const port = createProtectionGitHubPort({
+    actorId: 'U_owner',
+    repositoryId: 'R_repo',
+    execute: f.execute,
+    managedRulesetIds: { main: 1, develop: 2 },
+  });
+  const current = await port.observeControls();
+  assert.equal((await port.restoreBaselineControls(current.value.revision)).kind, 'verified');
+  assert.deepEqual(
+    f.state.mutations.slice(offset, offset + 2).map((r) => ({ method: r.method, path: r.path })),
+    [
+      { method: 'PUT', path: 'repos/glyad/github-workspace-manager/rulesets/1' },
+      { method: 'PUT', path: 'repos/glyad/github-workspace-manager/rulesets/2' },
+    ],
+  );
+});
+test('typed native Copilot extra-approval field is inert only at zero approvals with empty required reviewers', async () => {
+  const f = githubFixture();
+  f.state.applyWrites = true;
+  f.state.serverPRFields = {
+    required_reviewers: [],
+    require_extra_approval_for_unattributed_changes: true,
+  };
+  const port = createProtectionGitHubPort({
+    actorId: 'U_owner',
+    repositoryId: 'R_repo',
+    execute: f.execute,
+  });
+  const before = await port.observeControls();
+  assert.equal((await port.restoreBaselineControls(before.value.revision)).kind, 'verified');
+  assert.ok(
+    f.state.mutations
+      .filter((r) => r.body?.rules)
+      .every(
+        (r) => !JSON.stringify(r.body).includes('require_extra_approval_for_unattributed_changes'),
+      ),
+  );
+});
+for (const [name, fields] of [
+  [
+    'nonzero approval gate',
+    {
+      required_reviewers: [],
+      required_approving_review_count: 1,
+      require_extra_approval_for_unattributed_changes: true,
+    },
+  ],
+  [
+    'untyped native flag',
+    { required_reviewers: [], require_extra_approval_for_unattributed_changes: 'true' },
+  ],
+  [
+    'nonempty required team reviewers',
+    {
+      required_reviewers: [
+        { reviewer: { id: 1, type: 'Team' }, minimum_approvals: 1, file_patterns: ['*'] },
+      ],
+      require_extra_approval_for_unattributed_changes: true,
+    },
+  ],
+  [
+    'other unknown parameters',
+    {
+      required_reviewers: [],
+      require_extra_approval_for_unattributed_changes: true,
+      unknown_future_gate: false,
+    },
+  ],
+])
+  test(`response normalization still blocks ${name}`, async () => {
+    const f = githubFixture();
+    f.state.applyWrites = true;
+    f.state.serverPRFields = fields;
+    const port = createProtectionGitHubPort({
+      actorId: 'U_owner',
+      repositoryId: 'R_repo',
+      execute: f.execute,
+    });
+    const before = await port.observeControls();
+    assert.equal((await port.restoreBaselineControls(before.value.revision)).kind, 'blocked');
+  });
+
+// These cases catch successful HTTP responses being trusted without usable bodies.
+for (const [name, route, body] of [
+  ['malformed workflow JSON', '/actions/permissions/workflow', 'sensitive-payload-canary'],
+  ['null workflow', '/actions/permissions/workflow', 'null'],
+  ['empty workflow object', '/actions/permissions/workflow', '{}'],
+  [
+    'invalid workflow permissions',
+    '/actions/permissions/workflow',
+    '{"default_workflow_permissions":true,"can_approve_pull_request_reviews":false}',
+  ],
+  ['invalid Actions fields', '/actions/permissions', '{"allowed_actions":"selected"}'],
+  ['null selected list', '/actions/permissions/selected-actions', 'null'],
+  [
+    'invalid selected patterns',
+    '/actions/permissions/selected-actions',
+    '{"github_owned_allowed":false,"verified_allowed":false,"patterns_allowed":{}}',
+  ],
+  ['null workflow inventory', '/actions/workflows?per_page=100', 'null'],
+  [
+    'invalid workflow inventory',
+    '/actions/workflows?per_page=100',
+    '{"total_count":0,"workflows":null}',
+  ],
+  ['null reporting setting', '/private-vulnerability-reporting', 'null'],
+  ['invalid reporting setting', '/private-vulnerability-reporting', '{"enabled":"false"}'],
+  ['null scanning setting', '/code-scanning/default-setup', 'null'],
+  ['invalid scanning setting', '/code-scanning/default-setup', '{"state":false}'],
+  ['null ruleset summary', '/rulesets?includes_parents=true&per_page=100', '[null]'],
+]) {
+  test(`successful GET with ${name} blocks restoration before writes`, async () => {
+    const f = githubFixture();
+    const port = createProtectionGitHubPort({
+      actorId: 'U_owner',
+      repositoryId: 'R_repo',
+      execute: (binary, argv, options) => {
+        const result = f.execute(binary, argv, options);
+        return argv[argv.indexOf('--method') + 1] === 'GET' && argv.at(-1).endsWith(route)
+          ? { ok: true, stdout: `HTTP/2.0 200 OK\r\n\r\n${body}` }
+          : result;
+      },
+    });
+    assert.equal((await port.observeControls()).kind, 'blocked');
+    const result = await port.restoreBaselineControls('untrusted-revision');
+    assert.equal(result.kind, 'blocked');
+    assert.equal(f.state.mutations.length, 0);
+    assert.ok(!JSON.stringify(result).includes('sensitive-payload-canary'));
+  });
+}
+
+test('malformed successful final observation returns blocked after acknowledged restoration writes', async () => {
+  const f = githubFixture();
+  f.state.applyWrites = true;
+  const port = createProtectionGitHubPort({
+    actorId: 'U_owner',
+    repositoryId: 'R_repo',
+    execute: (binary, argv, options) => {
+      const result = f.execute(binary, argv, options);
+      return f.state.mutations.length > 0 &&
+        argv[argv.indexOf('--method') + 1] === 'GET' &&
+        argv.at(-1).endsWith('/actions/permissions/workflow')
+        ? { ok: true, stdout: 'HTTP/2.0 200 OK\r\n\r\nsensitive-payload-canary' }
+        : result;
+    },
+  });
+  const before = await port.observeControls();
+  const result = await port.restoreBaselineControls(before.value.revision);
+  assert.equal(result.kind, 'blocked');
+  assert.equal(f.state.mutations.length, 8);
+  assert.ok(!JSON.stringify(result).includes('sensitive-payload-canary'));
+});
+
+test('malformed failed write body retains known HTTP status and safe enum receipt', async () => {
+  const f = githubFixture();
+  const port = createProtectionGitHubPort({
+    actorId: 'U_owner',
+    repositoryId: 'R_repo',
+    execute: (binary, argv, options) =>
+      argv[argv.indexOf('--method') + 1] === 'PUT' &&
+      argv.at(-1).endsWith('/actions/permissions/workflow')
+        ? { ok: false, stdout: 'HTTP/2.0 403 Forbidden\r\n\r\nsensitive-payload-canary' }
+        : f.execute(binary, argv, options),
+  });
+  const before = await port.observeControls();
+  const result = await port.restoreBaselineControls(before.value.revision);
+  assert.equal(result.kind, 'uncertain');
+  assert.deepEqual(result.failedOperation, {
+    index: 2,
+    method: 'PUT',
+    path: 'repos/glyad/github-workspace-manager/actions/permissions/workflow',
+    httpStatus: 403,
+    classification: 'permission-denied',
+  });
+  assert.equal(result.completedOperations.length, 2);
+  assert.equal(f.state.mutations.length, 2);
+  assert.ok(!JSON.stringify(result).includes('sensitive-payload-canary'));
 });

@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { blocked, verified } from './contracts.mjs';
+import { isEvidenceFor } from './validate.mjs';
 
 /**
  * @typedef {{operationId:string,action:'upsert-ruleset',resourceId:string,arguments:object,preconditions:{revision:string}}} ProtectionOperation
@@ -104,6 +105,7 @@ function executeDefault(binary, args, options = {}) {
   }
 }
 const digest = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
 /**
  * Bounded setup-only REST adapter. execute receives argv and JSON stdin; stderr is
@@ -114,6 +116,7 @@ export function createProtectionGitHubPort({
   repositoryId,
   actorId,
   execute = executeDefault,
+  managedRulesetIds,
 } = {}) {
   const evidence = (revision) => [
     {
@@ -143,7 +146,7 @@ export function createProtectionGitHubPort({
         .trim();
       return { status, value: text ? JSON.parse(text) : null };
     } catch {
-      return { status: 0, value: null };
+      return { status, value: null };
     }
   }
   const get = (path) => request('GET', path);
@@ -164,11 +167,21 @@ export function createProtectionGitHubPort({
     if (!identity())
       return blocked('Authenticated maintainer/repository identity unverified', evidence());
     const repo = get(base);
+    if (
+      repo.status !== 200 ||
+      !isObject(repo.value) ||
+      repo.value.node_id !== repositoryId ||
+      repo.value.full_name !== fullName ||
+      repo.value.visibility !== 'public'
+    )
+      return blocked('Repository observation incomplete', evidence());
     const list = get(`${base}/rulesets?includes_parents=true&per_page=100`);
     if (list.status !== 200 || !Array.isArray(list.value) || list.value.length >= 100)
       return blocked('Complete ruleset inventory unavailable', evidence());
     const rulesets = [];
     for (const summary of list.value) {
+      if (!isObject(summary) || !Number.isSafeInteger(summary.id) || summary.id <= 0)
+        return blocked('Ruleset summary identity unavailable', evidence());
       // Organization rules cannot be changed here. Unreadable inherited detail blocks.
       const detail = get(`${base}/rulesets/${summary.id}`);
       if (
@@ -202,7 +215,8 @@ export function createProtectionGitHubPort({
       if (
         effective.status !== 200 ||
         !Array.isArray(effective.value) ||
-        ![200, 404].includes(classic.status)
+        ![200, 404].includes(classic.status) ||
+        (classic.status === 200 && !isObject(classic.value))
       )
         return blocked('Effective branch protection unavailable', evidence());
       branches[branch] = {
@@ -214,7 +228,10 @@ export function createProtectionGitHubPort({
     const actions = get(`${base}/actions/permissions`);
     if (
       actions.status !== 200 ||
-      !['all', 'local_only', 'selected'].includes(actions.value?.allowed_actions)
+      !isObject(actions.value) ||
+      typeof actions.value.enabled !== 'boolean' ||
+      typeof actions.value.sha_pinning_required !== 'boolean' ||
+      !['all', 'local_only', 'selected'].includes(actions.value.allowed_actions)
     )
       return blocked('Actions policy observation incomplete', evidence());
     // This endpoint applies only after selected policy is configured. Never
@@ -234,6 +251,32 @@ export function createProtectionGitHubPort({
       ![204, 404].includes(alerts.status)
     )
       return blocked('Security/Actions capability observation incomplete', evidence());
+    // A successful status alone does not establish usable settings. Reject
+    // malformed JSON, null/primitive bodies and invalid required fields before
+    // dereferencing or normalizing; preserve HTTP statuses for write receipts.
+    if (
+      !isObject(workflow.value) ||
+      !['read', 'write'].includes(workflow.value.default_workflow_permissions) ||
+      typeof workflow.value.can_approve_pull_request_reviews !== 'boolean' ||
+      (!selected.notConfigured &&
+        (!isObject(selected.value) ||
+          typeof selected.value.github_owned_allowed !== 'boolean' ||
+          typeof selected.value.verified_allowed !== 'boolean' ||
+          (selected.value.patterns_allowed !== undefined &&
+            (!Array.isArray(selected.value.patterns_allowed) ||
+              !selected.value.patterns_allowed.every(
+                (pattern) => typeof pattern === 'string',
+              ))))) ||
+      !isObject(workflows.value) ||
+      !Number.isSafeInteger(workflows.value.total_count) ||
+      workflows.value.total_count < 0 ||
+      !Array.isArray(workflows.value.workflows) ||
+      !isObject(privateReports.value) ||
+      typeof privateReports.value.enabled !== 'boolean' ||
+      !isObject(scanning.value) ||
+      !['configured', 'not-configured'].includes(scanning.value.state)
+    )
+      return blocked('Security/Actions response body invalid or incomplete', evidence());
     const setting = (value) => ({
       capability:
         value?.status === 'enabled' || value?.status === 'disabled' ? 'available' : 'unknown',
@@ -289,7 +332,7 @@ export function createProtectionGitHubPort({
     value.revision = digest(value);
     return verified(value, evidence(value.revision));
   }
-  async function restoreBaselineControls(expectedRevision) {
+  async function restoreBaselineControls(expectedRevision, { recordOperation } = {}) {
     const before = await observeControls();
     if (before.kind !== 'verified') return before;
     if (!expectedRevision || before.value.revision !== expectedRevision)
@@ -316,6 +359,18 @@ export function createProtectionGitHubPort({
       const matches = before.value.rulesets.filter((s) => s.name === op.arguments.name);
       if (matches.length > 1)
         return blocked('Duplicate baseline ruleset name; reconcile exact IDs', before.evidence);
+      if (managedRulesetIds) {
+        const branch = op.arguments.conditions.ref_name.include[0].split('/').at(-1);
+        if (
+          !Number.isSafeInteger(managedRulesetIds[branch]) ||
+          matches.length !== 1 ||
+          matches[0].id !== managedRulesetIds[branch]
+        )
+          return blocked(
+            'Adopted ruleset identity missing or changed; creation fallback denied',
+            before.evidence,
+          );
+      }
       mutations.push({
         method: matches.length ? 'PUT' : 'POST',
         path: `${base}/rulesets${matches.length ? `/${matches[0].id}` : ''}`,
@@ -353,19 +408,71 @@ export function createProtectionGitHubPort({
         },
       },
     );
-    for (const mutation of mutations) {
+    const classify = (status) =>
+      status >= 200 && status < 300
+        ? 'acknowledged'
+        : status === 401
+          ? 'authentication-required'
+          : status === 403
+            ? 'permission-denied'
+            : status === 404
+              ? 'endpoint-unavailable'
+              : status === 409
+                ? 'conflict'
+                : status === 422
+                  ? 'validation-failed'
+                  : status === 429
+                    ? 'rate-limited'
+                    : status >= 500
+                      ? 'service-unavailable'
+                      : 'unknown-response';
+    const receipts = [];
+    async function persistOperation(record) {
+      if (recordOperation === undefined) return true;
+      if (typeof recordOperation !== 'function') return false;
+      try {
+        const r = await recordOperation(structuredClone(record));
+        return (
+          r?.kind === 'verified' &&
+          isEvidenceFor(r.evidence, actorId, [repositoryId]) &&
+          JSON.stringify(r.value) === JSON.stringify(record)
+        );
+      } catch {
+        return false;
+      }
+    }
+    for (const [index, mutation] of mutations.entries()) {
       if (!identity())
         return blocked(
           'Identity changed during restoration; reconcile partial effects',
           evidence(),
         );
+      const operation = { index, method: mutation.method, path: mutation.path };
+      if (!(await persistOperation({ phase: 'intent', ...operation })))
+        return blocked('Operation intent journal unavailable; remote attempt blocked', evidence());
       const response = request(mutation.method, mutation.path, mutation.body);
+      const receipt = {
+        ...operation,
+        httpStatus: response.status,
+        classification: classify(response.status),
+      };
+      if (!(await persistOperation({ phase: 'result', ...receipt })))
+        return {
+          kind: 'blocked',
+          reason: 'Operation result journal unavailable; reconcile outcome before continuing',
+          failedOperation: receipt,
+          completedOperations: receipts,
+          evidence: evidence(),
+        };
       if (![200, 201, 204].includes(response.status))
         return {
           kind: 'uncertain',
           reason: 'Bounded restoration denied or outcome unknown; reread controls before retry',
+          failedOperation: receipt,
+          completedOperations: receipts,
           evidence: evidence(),
         };
+      receipts.push(receipt);
     }
     const after = await observeControls();
     if (after.kind !== 'verified') return after;
@@ -458,7 +565,19 @@ function sameProtectionSemantics(actual, desired) {
           'required_review_thread_resolution',
           'allowed_merge_methods',
           'automatic_copilot_code_review_enabled',
+          'required_reviewers',
+          'require_extra_approval_for_unattributed_changes',
         ];
+        // Native GitHub UI: this flag adds approval only for unattributed
+        // Copilot PRs when the required count is nonzero. Never write it here.
+        if (
+          (p.required_reviewers !== undefined &&
+            (!Array.isArray(p.required_reviewers) || p.required_reviewers.length !== 0)) ||
+          (p.require_extra_approval_for_unattributed_changes !== undefined &&
+            (typeof p.require_extra_approval_for_unattributed_changes !== 'boolean' ||
+              p.required_approving_review_count !== 0))
+        )
+          return null;
         if (
           Object.keys(p).some((k) => !known.includes(k)) ||
           (p.automatic_copilot_code_review_enabled !== undefined &&
