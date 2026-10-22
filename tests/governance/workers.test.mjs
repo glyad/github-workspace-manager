@@ -134,3 +134,123 @@ test('rejects worker substitution and unbounded result bodies despite matching s
   const huge = { ...result, diagnostics: 'x'.repeat(1_000_001) };
   assert.equal(acceptWorkerResult(c, run, huge, observed(huge)).action, 'none');
 });
+
+test('worker v2 candidate result preserves full identity and rejects legacy promotion', async () => {
+  const { encodeWorkerResult } = await import('../../tools/governance/worker-transport.mjs');
+  const v2 = { ...c, baseRef: 'refs/heads/develop', requestId: 'request-1', protocolVersion: 2 };
+  const body = encodeWorkerResult({ candidate: v2, worker: 'ci', outcome: 'success' });
+  assert.deepEqual(JSON.parse(body).candidate, v2);
+  assert.throws(() =>
+    encodeWorkerResult({
+      candidate: { ...c, protocolVersion: 2 },
+      worker: 'ci',
+      outcome: 'success',
+    }),
+  );
+});
+
+test('v2 exact-byte worker envelopes authenticate full identity and never upgrade historical archives', async () => {
+  const { generateKeyPairSync, sign } = await import('node:crypto');
+  const { encodeWorkerResult, verifyResultEnvelope } =
+    await import('../../tools/governance/worker-transport.mjs');
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const candidate = {
+    ...c,
+    baseRef: 'refs/heads/develop',
+    requestId: 'request-1',
+    protocolVersion: 2,
+  };
+  const workerRun = { ...run, actorId: 'worker', executionSha: run.sha, ref: 'refs/heads/main' };
+  const body = encodeWorkerResult({ candidate, worker: 'ci', outcome: 'success' });
+  const archive = {
+    version: 2,
+    purpose: 'worker-result',
+    run: workerRun,
+    candidate,
+    worker: 'ci',
+    bodyDigest: createHash('sha256').update(body).digest('hex'),
+  };
+  const envelope = (value) => {
+    const body = JSON.stringify(value);
+    return { body, signature: sign(null, Buffer.from(body), privateKey).toString('base64') };
+  };
+  assert.equal(
+    verifyResultEnvelope(body, envelope(archive), workerRun, candidate, 'ci', publicKey).kind,
+    'verified',
+  );
+  for (const patch of [
+    { baseRef: 'refs/heads/main' },
+    { requestId: 'other' },
+    { protocolVersion: 1 },
+  ])
+    assert.equal(
+      verifyResultEnvelope(
+        body,
+        envelope(archive),
+        workerRun,
+        { ...candidate, ...patch },
+        'ci',
+        publicKey,
+      ).kind,
+      'blocked',
+    );
+  assert.equal(
+    verifyResultEnvelope(body + ' ', envelope(archive), workerRun, candidate, 'ci', publicKey).kind,
+    'blocked',
+  );
+  assert.equal(
+    verifyResultEnvelope(
+      body,
+      envelope({ ...archive, version: 1 }),
+      workerRun,
+      candidate,
+      'ci',
+      publicKey,
+    ).kind,
+    'blocked',
+  );
+  const legacyBody = encodeWorkerResult(result);
+  const legacy = {
+    ...archive,
+    version: 1,
+    candidate: c,
+    bodyDigest: createHash('sha256').update(legacyBody).digest('hex'),
+  };
+  assert.equal(
+    verifyResultEnvelope(legacyBody, envelope(legacy), workerRun, c, 'ci', publicKey).kind,
+    'verified',
+  );
+  assert.equal(
+    verifyResultEnvelope(legacyBody, envelope(legacy), workerRun, candidate, 'ci', publicKey).kind,
+    'blocked',
+  );
+});
+
+test('signed archive parsing rejects incomplete, extra-field and unknown-version candidate unions', async () => {
+  const { generateKeyPairSync, sign } = await import('node:crypto');
+  const { verifyArchive } = await import('../../tools/governance/worker-transport.mjs');
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const archiveRun = { ...run, actorId: 'worker', executionSha: run.sha, ref: 'refs/heads/main' };
+  for (const candidate of [
+    { ...c, protocolVersion: 2 },
+    { ...c, extra: true },
+    { ...c, protocolVersion: 3 },
+    { ...c, protocolVersion: 2, requestId: 'request-1', baseRef: 'refs/heads/a..b' },
+  ]) {
+    const body = JSON.stringify({
+      version: candidate.protocolVersion === 2 ? 2 : 1,
+      purpose: 'worker-result',
+      run: archiveRun,
+      candidate,
+    });
+    const envelope = {
+      body,
+      signature: sign(null, Buffer.from(body), privateKey).toString('base64'),
+    };
+    assert.equal(
+      verifyArchive(envelope, { purpose: 'worker-result', run: archiveRun, candidate }, publicKey)
+        .kind,
+      'blocked',
+    );
+  }
+});

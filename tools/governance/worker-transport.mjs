@@ -41,7 +41,8 @@ export function verifyArchive(envelope, expected, publicKey) {
     if (!publicKey || !verify(null, Buffer.from(envelope.body), publicKey, signature))
       return blocked('Archive signature');
     if (
-      a.version !== 1 ||
+      (Object.hasOwn(a, 'candidate') && !validCandidate(a.candidate)) ||
+      a.version !== (a.candidate?.protocolVersion === 2 ? 2 : 1) ||
       Object.entries(expected).some(([k, v]) => JSON.stringify(a[k]) !== JSON.stringify(v))
     )
       return blocked('Archive binding');
@@ -65,13 +66,12 @@ export function encodeWorkerResult(result) {
   )
     throw Error('Malformed result');
   if (
-    Object.keys(result.candidate).length !== 5 ||
-    (result.worker === 'review' &&
-      (result.model !== 'gpt-6-astra' ||
-        result.effort !== 'high' ||
-        result.fresh !== true ||
-        !Number.isSafeInteger(result.findings) ||
-        result.findings < 0))
+    result.worker === 'review' &&
+    (result.model !== 'gpt-6-astra' ||
+      result.effort !== 'high' ||
+      result.fresh !== true ||
+      !Number.isSafeInteger(result.findings) ||
+      result.findings < 0)
   )
     throw Error('Unexpected candidate or review schema');
   const body = JSON.stringify(result);
