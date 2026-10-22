@@ -1,20 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, sign } from 'node:crypto';
 import { mkdtemp, appendFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { admitCandidate } from '../../tools/governance/admission.mjs';
-import { authenticateReadinessRequest } from '../../tools/governance/readiness-request.mjs';
-import { readinessWindowDigest } from '../../tools/governance/readiness-handshake.mjs';
 import { verified } from '../../tools/governance/contracts.mjs';
 import { digest, operationKey } from '../../tools/governance/journal.mjs';
+import { ciClaimId } from '../../tools/governance/worker-dispatch.mjs';
 import { LocalDurableStore } from '../../tools/governance/local-durable-store.mjs';
 import { createGithubPort } from '../../tools/governance/github-port.mjs';
 import {
   handleTrustedEvent as handleNativeEvent,
   handleTrustedWorkerCallback,
+  handleTrustedCiContinuation,
 } from '../../tools/governance/controller-runtime.mjs';
 import {
   encodeWorkerResult,
@@ -22,297 +21,16 @@ import {
   resultDecision,
   verifyArchive,
 } from '../../tools/governance/worker-transport.mjs';
-const { publicKey, privateKey } = generateKeyPairSync('ed25519');
-const c = {
-  repositoryId: '1',
-  pr: 2,
-  base: 'a'.repeat(40),
-  head: 'b'.repeat(40),
-  attempt: '10',
-  protocolVersion: 2,
-  requestId: 'request-1',
-  baseRef: 'refs/heads/develop',
-};
-const run = {
-  id: '3',
-  attempt: 1,
-  repositoryId: '1',
-  workflowId: '4',
-  sha: 'c'.repeat(40),
-  executionSha: 'e'.repeat(40),
-  actorId: '5',
-  event: 'pull_request_target',
-  ref: 'refs/heads/main',
-};
-const signed = (a) => {
-  const body = JSON.stringify({ version: a.candidate?.protocolVersion === 2 ? 2 : 1, ...a });
-  return { body, signature: sign(null, Buffer.from(body), privateKey).toString('base64') };
-};
-const workerRun = { ...run, id: '6', workflowId: '8', event: 'workflow_dispatch' };
-const timeline = [
-  { id: 10, actor: { id: 5 }, event: 'ready_for_review', created_at: '2026-01-01T00:00:00Z' },
-];
-const snapshot = () => ({
-  number: 2,
-  node_id: 'PR_2',
-  state: 'open',
-  draft: false,
-  base: { sha: c.base, ref: 'develop', repo: { id: 1 } },
-  head: { sha: c.head, repo: { id: 1 } },
-});
-async function fixture(
-  t,
-  {
-    events = timeline,
-    pr = snapshot(),
-    proof = true,
-    modify = () => {},
-    workerResult = { candidate: c, worker: 'ci', outcome: 'success', claimId: 'claim-1' },
-  } = {},
-) {
-  const dir = await mkdtemp(join(tmpdir(), 'bridge-'));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  const store = new LocalDurableStore(dir);
-  const request = {
-    protocolVersion: 2,
-    requestId: c.requestId,
-    repositoryId: c.repositoryId,
-    pr: c.pr,
-    prNodeId: 'PR_2',
-    baseRef: c.baseRef,
-    base: c.base,
-    head: c.head,
-    initiatingActorId: '9',
-    originalRunId: '12',
-    workflowId: run.workflowId,
-    definitionSha: run.sha,
-  };
-  const dispatchRun = {
-    ...run,
-    id: '12',
-    actorId: '9',
-    event: 'workflow_dispatch',
-    executionSha: run.sha,
-  };
-  store.authorizeReadinessRequest = async (q) =>
-    authenticateReadinessRequest(JSON.stringify(q), {
-      runId: '12',
-      runAttempt: 1,
-      authorizedActorIds: ['9'],
-      approvedDefinition: Object.freeze({
-        repositoryId: '1',
-        workflowId: run.workflowId,
-        sha: run.sha,
-        ref: run.ref,
-      }),
-      lookupRun: async () => verified(dispatchRun),
-      resolvePr: async () => verified({ repositoryId: '1', pr: 2, prNodeId: 'PR_2' }),
-      verifyRequestEvidence: async (body) =>
-        verified({
-          bodyDigest: digest(body),
-          originalRunId: '12',
-          runAttempt: 1,
-          definitionSha: run.sha,
-          triggeringActorId: '9',
-        }),
-    });
-  const originalAfter = {
-    repositoryId: '1',
-    pr: 2,
-    prNodeId: 'PR_2',
-    state: 'open',
-    draft: false,
-    baseRef: c.baseRef,
-    base: c.base,
-    head: c.head,
-    events: timeline.map((e) => ({ id: String(e.id), kind: e.event, actorId: '5' })),
-    complete: true,
-    order: 'native',
-    nativeDigest: digest(JSON.stringify({ p: snapshot(), events: timeline })),
-  };
-  originalAfter.evidenceDigest = readinessWindowDigest(originalAfter);
-  const retainedProof = {
-    version: 2,
-    request,
-    candidate: c,
-    beforeDigest: '1'.repeat(64),
-    afterDigest: originalAfter.evidenceDigest,
-    mutationDigest: '3'.repeat(64),
-    witnessId: c.attempt,
-    originalRunId: '12',
-    runAttempt: 1,
-    definitionSha: run.sha,
-  };
-  const proofBody = JSON.stringify(retainedProof),
-    proofDigest = digest(proofBody);
-  await store.withPrLock('1:2', async () => {
-    let o = {
-      version: 2,
-      request,
-      state: 'intent',
-      beforeDigest: null,
-      mutationDigest: null,
-      proofDigest: null,
-      continuation: null,
-    };
-    assert.equal((await store.appendOperation(o)).kind, 'verified');
-    for (const patch of [
-      { state: 'mutation-pending' },
-      { state: 'mutation-pending', beforeDigest: retainedProof.beforeDigest },
-      { state: 'mutation-observed', mutationDigest: retainedProof.mutationDigest },
-      { state: 'accepted', proofDigest },
-    ]) {
-      o = { ...o, ...patch };
-      assert.equal((await store.appendOperation(o)).kind, 'verified');
-    }
-  });
-  const claim = {
-    id: 'claim-1',
-    candidate: c,
-    worker: 'ci',
-    requestId: c.requestId,
-    definitionSha: workerRun.sha,
-    status: 'observed',
-    run: workerRun,
-    start:
-      workerResult.outcome === 'failure'
-        ? {
-            claimId: 'claim-1',
-            candidate: c,
-            definitionSha: workerRun.sha,
-            runId: workerRun.id,
-            runAttempt: workerRun.attempt,
-            state: 'consumed',
-          }
-        : null,
-  };
-  const comments = [];
-  const calls = [];
-  const records = new Map();
-  const archive = async (purpose, input) => {
-    if (!proof) return null;
-    if (purpose === 'readiness-admission')
-      return {
-        body: proofBody,
-        envelope: signed({ purpose: 'readiness-proof', run, bodyDigest: proofDigest }),
-        after: originalAfter,
-      };
-    if (purpose === 'readiness-observation') return signed({ purpose, run, ...input.bindings });
-    if (purpose === 'native-history')
-      return signed({
-        purpose,
-        run,
-        candidate: c,
-        readyEventId: '10',
-        historyStart: 'creation',
-        timelineDigest: digest(JSON.stringify(events)),
-        snapshotDigest: digest(JSON.stringify(pr)),
-      });
-    if (purpose === 'journal') return records.get(input.body);
-    if (purpose === 'journal-index')
-      return signed({
-        purpose,
-        run,
-        ledgerId: '7',
-        entriesDigest: digest(JSON.stringify(comments.map((e) => [e.id, digest(e.body)]))),
-      });
-  };
-  const http = async (req) => {
-    calls.push(req);
-    let body;
-    if (req.path.endsWith('/pulls/2')) body = pr;
-    else if (req.path.endsWith('/issues/7')) body = { id: 7, user: { id: 5 } };
-    else if (req.path.includes('/timeline?')) body = events;
-    else if (req.path.includes('/comments?')) body = comments;
-    else if (req.path.endsWith('/comments') && req.method === 'POST') {
-      const b = JSON.parse(req.body).body;
-      const row = JSON.parse(b);
-      records.set(
-        b,
-        signed({ purpose: 'journal', run, candidate: row.candidate, bodyDigest: digest(b) }),
-      );
-      body = {
-        id: comments.length + 1,
-        body: b,
-        user: { id: 5 },
-        created_at: '2026-01-01T00:00:00Z',
-        updated_at: '2026-01-01T00:00:00Z',
-      };
-      comments.push(body);
-    } else if (req.path.includes('/actions/runs/')) {
-      const r = req.path.includes('/runs/6/') ? workerRun : run;
-      body = {
-        id: Number(r.id),
-        run_attempt: r.attempt,
-        repository: { id: 1 },
-        workflow_id: Number(r.workflowId),
-        actor: { id: 5 },
-        event: r.event,
-        head_sha: r.executionSha,
-      };
-    } else if (req.path === '/graphql') {
-      pr.draft = true;
-      body = {
-        data: { convertPullRequestToDraft: { pullRequest: { id: pr.node_id, isDraft: true } } },
-      };
-    } else throw Error('Unexpected request');
-    const response = {
-      status: req.method === 'POST' && req.path.endsWith('/comments') ? 201 : 200,
-      headers: {},
-      body: JSON.stringify(body),
-    };
-    modify(req, response);
-    return response;
-  };
-  const port = createGithubPort({
-    http,
-    archive,
-    publicKey,
-    store,
-    repository: 'o/r',
-    repositoryId: '1',
-    ledgerNumber: 7,
-    ledgerId: '7',
-    controllerRun: run,
-    ciContinuation: {
-      readCiContinuation: async () => verified(structuredClone(claim)),
-      consumeCiStart: async () => {
-        if (claim.start) return verified({ newlyConsumed: false, claim });
-        claim.start = {
-          claimId: claim.id,
-          runId: workerRun.id,
-          runAttempt: workerRun.attempt,
-          candidate: c,
-          definitionSha: workerRun.sha,
-          state: 'consumed',
-        };
-        return verified({ newlyConsumed: true, claim: structuredClone(claim) });
-      },
-    },
-    workers: { ci: workerRun },
-    workerResults: async () => {
-      const body = encodeWorkerResult({ ...workerResult, claimId: claim.id });
-      return {
-        body,
-        envelope: signed({
-          purpose: 'worker-result',
-          run: workerRun,
-          candidate: c,
-          worker: 'ci',
-          bodyDigest: digest(body),
-        }),
-      };
-    },
-  });
-  port.fixtureProofDigest = proofDigest;
-  return {
-    port,
-    store,
-    calls,
-    comments,
-    dir,
-  };
-}
+import {
+  publicKey,
+  signed,
+  c,
+  run,
+  workerRun,
+  timeline,
+  snapshot,
+  fixture,
+} from './composed-adapter-fixture.mjs';
 // Positive runtime regressions begin with a separately authenticated retained v2
 // operation. Metadata alone is tested through handleNativeEvent below.
 async function admitRetainedFixture(input, context) {
@@ -1072,4 +790,60 @@ test('runtime failed-worker uncertainty before WAL survives restart and denies l
     { code: 'EEXIST' },
   );
   assert.equal(comments.length, 2);
+});
+
+test('explicit continuation runtime composes real local durable providers and stays closed by default', async (t) => {
+  const f = await fixture(t, { concreteContinuation: true });
+  const closed = await handleTrustedCiContinuation({ candidate: c }, { port: f.port });
+  assert.equal(closed.kind, 'blocked');
+  assert.equal(f.calls.length, 0);
+  assert.equal(
+    (
+      await admitCandidate(f.port, {
+        type: 'verified_readiness',
+        repositoryId: '1',
+        pr: 2,
+        readinessId: c.attempt,
+        candidate: c,
+        proofDigest: f.port.fixtureProofDigest,
+      })
+    ).kind,
+    'verified',
+  );
+  const dispatched = await handleTrustedCiContinuation(
+    { candidate: c },
+    { port: f.port, mode: 'offline-test' },
+  );
+  assert.equal(dispatched.kind, 'verified');
+  const body = JSON.stringify({
+    type: 'worker_start',
+    worker: 'ci',
+    candidate: c,
+    claimId: dispatched.value.id,
+  });
+  const input = {
+    body,
+    archive: signed({
+      purpose: 'worker-callback',
+      run: workerRun,
+      worker: 'ci',
+      candidate: c,
+      bodyDigest: digest(body),
+    }),
+  };
+  const context = { port: f.port, expectedRun: workerRun, publicKey, mode: 'offline-test' };
+  assert.equal((await handleTrustedWorkerCallback(input, context)).kind, 'verified');
+  assert.equal((await f.store.readCiClaim(dispatched.value.id)).value.start.state, 'consumed');
+  assert.equal((await handleTrustedWorkerCallback(input, context)).kind, 'blocked');
+  assert.equal(
+    (
+      await handleTrustedCiContinuation(
+        { claimId: dispatched.value.id },
+        { port: f.port, mode: 'offline-test' },
+      )
+    ).kind,
+    'verified',
+  );
+  assert.equal((await handleTrustedWorkerCallback(input, context)).kind, 'blocked');
+  assert.equal(f.calls.filter((x) => x.path.endsWith('/dispatches')).length, 1);
 });

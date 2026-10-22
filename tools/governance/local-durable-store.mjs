@@ -1,5 +1,8 @@
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
+import { ciClaimId } from './worker-dispatch.mjs';
+import { validDispatchClaim } from './worker-transport.mjs';
+import { sameExecution } from './worker-results.mjs';
 import { digest } from './journal.mjs';
 import { verified, requestId as validId, validReadinessRequest } from './contracts.mjs';
 import { randomUUID } from 'node:crypto';
@@ -91,6 +94,92 @@ export class LocalDurableStore {
     return rows.filter(
       (r) => r.type === 'pending' && !rows.some((s) => s.type === 'resolved' && s.id === r.id),
     );
+  }
+  // Local TEST evidence: independent append membership precedes each log write.
+  // Missing rows/tails retain the slot as uncertainty; no repair or retry exists.
+  async readCiClaim(claimId) {
+    try {
+      if (!validId(claimId)) throw Error('Claim identity');
+      const key = `ci-claim:${claimId}`;
+      const rows = await this.read(key);
+      let members = [];
+      try {
+        members = await fs.readdir(join(this.root, `${digest(key)}.ci-members`));
+      } catch (e) {
+        if (e.code !== 'ENOENT') throw e;
+      }
+      const expected = rows.map((r, i) => `${i}-${digest(JSON.stringify(r))}`).sort();
+      if (JSON.stringify(expected) !== JSON.stringify(members.sort()))
+        throw Error('Missing CI history');
+      for (let i = 0; i < rows.length; i++) {
+        if (
+          !validDispatchClaim(rows[i]) ||
+          rows[i].id !== ciClaimId(rows[i].candidate) ||
+          rows[i].id !== claimId ||
+          !this.validCiTransition(rows[i - 1], rows[i])
+        )
+          throw Error('CI history binding');
+      }
+      await this.fault('ci-readback', rows.at(-1));
+      return verified(rows.at(-1) ?? null);
+    } catch {
+      return { kind: 'uncertain', reason: 'Local CI claim unavailable', evidence: [] };
+    }
+  }
+  validCiTransition(previous, next) {
+    if (!previous) return next.status === 'pending' && next.run === null && next.start === null;
+    const fixed = (c) =>
+      JSON.stringify([c.id, c.candidate, c.worker, c.requestId, c.definitionSha]);
+    if (fixed(previous) !== fixed(next) || previous.status === 'quarantined') return false;
+    if (previous.run && !sameExecution(previous.run, next.run)) return false;
+    if (previous.start && JSON.stringify(previous.start) !== JSON.stringify(next.start))
+      return false;
+    if (previous.status === 'observed' && next.status === 'pending') return false;
+    return true;
+  }
+  async appendCiClaim(input) {
+    try {
+      const record = structuredClone(input);
+      if (!validDispatchClaim(record) || record.id !== ciClaimId(record.candidate))
+        throw Error('CI record');
+      const previous = await this.readCiClaim(record.id);
+      if (previous.kind !== 'verified') return previous;
+      if (!this.validCiTransition(previous.value, record)) throw Error('CI transition');
+      const key = `ci-claim:${record.id}`;
+      const rows = await this.read(key);
+      const membership = join(this.root, `${digest(key)}.ci-members`);
+      await fs.mkdir(membership, { recursive: true, mode: 0o700 });
+      const witness = await fs.open(
+        join(membership, `${rows.length}-${digest(JSON.stringify(record))}`),
+        'wx',
+        0o600,
+      );
+      await witness.sync();
+      await witness.close();
+      const directory = await fs.open(membership, 'r');
+      await directory.sync();
+      await directory.close();
+      await this.syncDirectory();
+      await this.fault('ci-before-append', record);
+      await this.append(key, record);
+      const read = await this.readCiClaim(record.id);
+      if (read.kind !== 'verified' || JSON.stringify(read.value) !== JSON.stringify(record))
+        throw Error('CI append readback');
+      return read;
+    } catch {
+      return { kind: 'uncertain', reason: 'Local CI append unavailable', evidence: [] };
+    }
+  }
+  async appendCiStart(claimId, input) {
+    const start = structuredClone(input);
+    const read = await this.readCiClaim(claimId);
+    if (read.kind !== 'verified' || !read.value)
+      return read.kind === 'verified'
+        ? { kind: 'blocked', reason: 'Missing claim', evidence: [] }
+        : read;
+    if (read.value.start !== null)
+      return { kind: 'blocked', reason: 'CI start already consumed', evidence: [] };
+    return this.appendCiClaim({ ...read.value, start: structuredClone(start) });
   }
   // Operation-only append membership witnesses catch removed tails. These files
   // are local test evidence, not signatures or cross-runner durability proof.

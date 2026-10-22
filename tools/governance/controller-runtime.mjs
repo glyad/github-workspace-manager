@@ -1,3 +1,4 @@
+import { dispatchAdmittedCi, reconcileCiDispatch } from './worker-dispatch.mjs';
 import { authenticateReadinessRequest, readinessRequestBinding } from './readiness-request.mjs';
 import { withReadinessOperation } from './readiness-operation.mjs';
 import { runReadinessHandshakeInScope } from './readiness-handshake.mjs';
@@ -155,4 +156,15 @@ export async function handleTrustedReadinessRequest({ body, archive }, context =
   } catch {
     return blocked('Readiness composition unavailable');
   }
+}
+
+/** Explicit trusted continuation entry, closed in every unselected live mode.
+ * Candidate input supplies no authority; E reuses D's fresh shared admission. */
+export async function handleTrustedCiContinuation(input, context = {}) {
+  if (context.mode !== 'offline-test' || context.productionBackend != null)
+    return blocked('Production backend unselected');
+  const snapshot = structuredClone(input);
+  return snapshot?.claimId
+    ? reconcileCiDispatch(snapshot.claimId, context.port)
+    : dispatchAdmittedCi(snapshot?.candidate, context.port);
 }

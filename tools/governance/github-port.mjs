@@ -6,12 +6,15 @@ import {
   verifyArchive,
   readWorkerResult,
   resultDecision,
+  validDispatchClaim,
+  validCiRun,
 } from './worker-transport.mjs';
 import { verified, blocked, validReadinessRequest } from './contracts.mjs';
 import { readinessWindowDigest, readinessWindowBindings } from './readiness-handshake.mjs';
 import { readinessRequestBinding } from './readiness-request.mjs';
 import { validReadinessOperation } from './readiness-operation.mjs';
-import { candidateOf } from './controller.mjs';
+import { ciClaimId } from './worker-dispatch.mjs';
+import { candidateOf, decideReadiness } from './controller.mjs';
 const keyOf = (c) => `${c.repositoryId}:${c.pr}`;
 const numeric = (n) => Number.isSafeInteger(n) && n > 0;
 const id = (n) => (numeric(n) ? String(n) : null);
@@ -44,6 +47,55 @@ export function createGithubPort({
     throw Error('Unselected transport configuration');
   const root = `/repos/${repository}`;
   const active = new Set();
+  const ciSendable = new Map();
+  const ciIssuerRun = Object.freeze({ ...controllerRun });
+  const ciDefinition =
+    ciContinuation?.approvedDefinition && Object.freeze({ ...ciContinuation.approvedDefinition });
+  const ciConfigured = () =>
+    ciDefinition &&
+    validCiRun({ ...ciDefinition, id: '1', attempt: 1 }) &&
+    ciDefinition.repositoryId === repositoryId;
+  const ciDispatchBody = (claim) =>
+    JSON.stringify({
+      ref: ciDefinition.ref,
+      inputs: {
+        claim_id: claim.id,
+        request_id: claim.requestId,
+        candidate: JSON.stringify(claim.candidate),
+        definition_sha: claim.definitionSha,
+      },
+    });
+  async function ciGate(c) {
+    const observed = await port.observe(c),
+      journal = await port.readJournal(c);
+    const decision = decideReadiness(
+      observed,
+      {
+        type: 'worker_start',
+        worker: 'ci',
+        candidate: c,
+        repositoryId: c.repositoryId,
+        pr: c.pr,
+        readinessId: c.attempt,
+      },
+      journal,
+    );
+    return decision.action === 'start-ci' && sameCandidate(decision.candidate, c);
+  }
+  async function verifiedCiRun(claim, run) {
+    if (
+      !ciConfigured() ||
+      !validCiRun(run) ||
+      run.attempt !== 1 ||
+      ['repositoryId', 'workflowId', 'actorId', 'sha', 'executionSha', 'ref', 'event'].some(
+        (k) => run[k] !== ciDefinition[k],
+      ) ||
+      run.sha !== claim.definitionSha
+    )
+      return blocked('Unapproved CI dispatch execution');
+    await lookupRun(run);
+    return verified(run);
+  }
   const prNodes = new Map();
   const readinessActive = new Set(),
     readinessSent = new Set();
@@ -159,6 +211,7 @@ export function createGithubPort({
         return await fn();
       } finally {
         active.delete(key);
+        for (const [id, domain] of ciSendable) if (domain === key) ciSendable.delete(id);
         readinessActive.delete(key);
         readinessSent.delete(key);
       }
@@ -368,6 +421,7 @@ export function createGithubPort({
           return await fn();
         } finally {
           active.delete(key);
+          for (const [id, domain] of ciSendable) if (domain === key) ciSendable.delete(id);
         }
       });
     },
@@ -713,10 +767,138 @@ export function createGithubPort({
         throw Error('Draft outcome uncertain');
       // Controller performs its mandatory post-mutation current-candidate readback.
     },
+    async claimCiContinuation(input) {
+      const candidate = structuredClone(input);
+      if (!active.has(keyOf(candidate)) || !ciConfigured() || !(await ciGate(candidate)))
+        return blocked('CI claim requires fresh held admission and definition');
+      const operation = await store.readOperation(candidate.requestId);
+      if (
+        operation.kind !== 'verified' ||
+        operation.value?.state !== 'accepted' ||
+        operation.value.request.definitionSha !== ciDefinition.sha
+      )
+        return blocked('Accepted CI request required');
+      const claim = {
+        id: ciClaimId(candidate),
+        candidate,
+        worker: 'ci',
+        requestId: candidate.requestId,
+        definitionSha: ciDefinition.sha,
+        status: 'pending',
+        run: null,
+        start: null,
+      };
+      const old = await store.readCiClaim?.(claim.id);
+      if (old?.kind !== 'verified') return old ?? blocked('CI durable store unselected');
+      if (old.value) return blocked('CI continuation already occupied');
+      const written = await store.appendCiClaim(claim);
+      if (written.kind !== 'verified') return written;
+      const read = await store.readCiClaim(claim.id);
+      if (read.kind !== 'verified' || JSON.stringify(read.value) !== JSON.stringify(claim))
+        return { kind: 'uncertain', reason: 'CI claim readback unavailable', evidence: [] };
+      ciSendable.set(claim.id, keyOf(candidate));
+      return read;
+    },
     async readCiContinuation(claimId) {
-      return ciContinuation?.readCiContinuation
-        ? ciContinuation.readCiContinuation(claimId)
-        : blocked('CI continuation provider unselected');
+      // Existing D trusted injection remains supported; concrete E composition
+      // uses the actual membership-checked local test store by default.
+      if (ciContinuation?.readCiContinuation) return ciContinuation.readCiContinuation(claimId);
+      const read = await store.readCiClaim?.(claimId);
+      if (!read) return blocked('CI continuation provider unselected');
+      if (read.kind !== 'verified' || read.value === null) return read;
+      return validDispatchClaim(read.value)
+        ? verified(structuredClone(read.value))
+        : blocked('Malformed durable CI claim');
+    },
+    async dispatchCi(input) {
+      const claim = structuredClone(input);
+      if (
+        !validDispatchClaim(claim) ||
+        !active.has(keyOf(claim.candidate)) ||
+        !ciConfigured() ||
+        !ciSendable.delete(claim.id)
+      )
+        return blocked('No fresh CI send authority');
+      try {
+        const read = await port.readCiContinuation(claim.id);
+        if (
+          read.kind !== 'verified' ||
+          JSON.stringify(read.value) !== JSON.stringify(claim) ||
+          claim.status !== 'pending' ||
+          !(await ciGate(claim.candidate))
+        )
+          return blocked('CI dispatch binding changed');
+        const response = await http({
+          method: 'POST',
+          path: `${root}/actions/workflows/${ciDefinition.workflowId}/dispatches`,
+          headers: { accept: 'application/vnd.github+json', 'x-github-api-version': '2026-03-10' },
+          body: ciDispatchBody(claim),
+        });
+        if (response?.status !== 204 || !response.headers || response.body !== '')
+          throw Error('Unsettled CI response');
+        return verified(claim);
+      } catch {
+        return { kind: 'uncertain', reason: 'CI send outcome unknown; never retry', evidence: [] };
+      }
+    },
+    async findCiRun(input) {
+      try {
+        const claim = structuredClone(input);
+        if (!validDispatchClaim(claim) || !ciConfigured())
+          return blocked('CI discovery binding unavailable');
+        const dispatchBody = ciDispatchBody(claim);
+        const dispatchDigest = digest(dispatchBody);
+        const retained = await archive('ci-dispatch-discovery', {
+          claim: structuredClone(claim),
+          body: dispatchBody,
+          bodyDigest: dispatchDigest,
+        });
+        const body = retained?.body;
+        const data = boundedJson(body, 16384);
+        const authenticated = verifyArchive(
+          retained.envelope,
+          {
+            purpose: 'ci-dispatch-discovery',
+            run: ciIssuerRun,
+            bodyDigest: digest(body),
+            candidate: claim.candidate,
+          },
+          publicKey,
+        );
+        if (
+          authenticated.kind !== 'verified' ||
+          data.dispatchDigest !== dispatchDigest ||
+          data.claimId !== claim.id ||
+          data.requestId !== claim.requestId ||
+          !sameCandidate(data.candidate, claim.candidate) ||
+          data.definitionSha !== claim.definitionSha ||
+          !Array.isArray(data.runs) ||
+          data.runs.length !== 1
+        )
+          return blocked('Exact CI issuer provenance unavailable or ambiguous');
+        const run = Object.freeze({ ...data.runs[0] });
+        if (claim.run && !sameExecution(claim.run, run))
+          return blocked('Original CI binding cannot change');
+        return await verifiedCiRun(claim, run);
+      } catch {
+        return blocked('CI issuer discovery unavailable');
+      }
+    },
+    async bindCiRun(claimId, input) {
+      const run = Object.freeze({ ...input });
+      const read = await port.readCiContinuation(claimId);
+      if (read.kind !== 'verified' || !read.value)
+        return read.kind === 'verified' ? blocked('Missing CI claim') : read;
+      const claim = structuredClone(read.value);
+      if (!active.has(keyOf(claim.candidate)) || claim.status === 'quarantined')
+        return blocked('CI binding requires held PR lock');
+      // Authenticate provenance again at binding; native run metadata is not input evidence.
+      const found = await port.findCiRun(claim);
+      if (found.kind !== 'verified' || !sameExecution(found.value, run))
+        return blocked('Unverified original CI run');
+      if (claim.run)
+        return sameExecution(claim.run, run) ? verified(claim) : blocked('CI run already bound');
+      return store.appendCiClaim({ ...claim, status: 'observed', run });
     },
     async resolveCiContinuation(event) {
       if (
@@ -727,8 +909,8 @@ export function createGithubPort({
       )
         return blocked('CI claim identity required');
       const read = await port.readCiContinuation(event.claimId);
-      const claim = read?.value,
-        c = event.candidate;
+      const claim = read?.value && structuredClone(read.value),
+        c = structuredClone(event.candidate);
       const op = await store.readOperation?.(c.requestId);
       if (
         read?.kind !== 'verified' ||
@@ -750,12 +932,35 @@ export function createGithubPort({
       await lookupRun(claim.run);
       return verified(structuredClone(claim));
     },
-    async consumeCiStart(claimId, run) {
-      if (!active.has(keyOf((await port.readCiContinuation(claimId))?.value?.candidate ?? {})))
+    async consumeCiStart(claimId, input) {
+      const run = Object.freeze({ ...input });
+      const read = await port.readCiContinuation(claimId);
+      if (read.kind !== 'verified' || !read.value)
+        return read.kind === 'verified' ? blocked('Missing CI claim') : read;
+      const claim = structuredClone(read.value);
+      if (!active.has(keyOf(claim.candidate)))
         return blocked('CI consumption requires held PR lock');
-      return ciContinuation?.consumeCiStart
-        ? ciContinuation.consumeCiStart(claimId, run)
-        : blocked('CI consumption provider unselected');
+      if (ciContinuation?.consumeCiStart) return ciContinuation.consumeCiStart(claimId, run);
+      if (claim.status !== 'observed' || !sameExecution(claim.run, run))
+        return blocked('Original CI run required');
+      if (claim.start) return verified({ newlyConsumed: false, claim });
+      const start = {
+        claimId,
+        runId: run.id,
+        runAttempt: run.attempt,
+        candidate: claim.candidate,
+        definitionSha: claim.definitionSha,
+        state: 'consumed',
+      };
+      const write = await store.appendCiStart(claimId, start);
+      if (write.kind !== 'verified') return write;
+      const after = await port.readCiContinuation(claimId);
+      if (
+        after.kind !== 'verified' ||
+        JSON.stringify(after.value) !== JSON.stringify({ ...claim, start })
+      )
+        return { kind: 'uncertain', reason: 'CI consumption readback unavailable', evidence: [] };
+      return verified({ newlyConsumed: true, claim: after.value });
     },
     async verifyWorkerCallback(event, callbackRun) {
       const continuation =

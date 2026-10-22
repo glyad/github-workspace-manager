@@ -1,7 +1,7 @@
 import { verify } from 'node:crypto';
 import { digest, sameCandidate, validCandidate } from './journal.mjs';
 import { acceptWorkerResult } from './worker-results.mjs';
-import { blocked, verified } from './contracts.mjs';
+import { blocked, verified, exactFields, requestId, sha40 } from './contracts.mjs';
 export function boundedJson(body, max = 1_000_000) {
   if (typeof body !== 'string' || Buffer.byteLength(body) > max) throw Error('Body limit');
   return JSON.parse(body);
@@ -134,4 +134,71 @@ export function resultDecision(candidate, run, result, observed, envelope, publi
     ...observed,
     attestation: { verified: true, run, bodyDigest: digest(body) },
   });
+}
+
+/** Exact data schemas for the local continuation log and authenticated issuer. */
+export function validCiRun(r) {
+  return (
+    exactFields(r, [
+      'id',
+      'attempt',
+      'repositoryId',
+      'actorId',
+      'workflowId',
+      'sha',
+      'executionSha',
+      'ref',
+      'event',
+    ]) &&
+    /^\d+$/.test(r.id) &&
+    Number.isSafeInteger(r.attempt) &&
+    r.attempt > 0 &&
+    ['repositoryId', 'actorId', 'workflowId', 'ref'].every(
+      (k) => typeof r[k] === 'string' && r[k].length > 0 && Buffer.byteLength(r[k]) <= 255,
+    ) &&
+    sha40(r.sha) &&
+    sha40(r.executionSha) &&
+    r.event === 'workflow_dispatch'
+  );
+}
+export function validDispatchClaim(c) {
+  if (
+    !exactFields(c, [
+      'id',
+      'candidate',
+      'worker',
+      'requestId',
+      'definitionSha',
+      'status',
+      'run',
+      'start',
+    ]) ||
+    !requestId(c.id) ||
+    !validCandidate(c.candidate) ||
+    c.candidate.protocolVersion !== 2 ||
+    c.worker !== 'ci' ||
+    c.requestId !== c.candidate.requestId ||
+    !sha40(c.definitionSha) ||
+    !['pending', 'observed', 'quarantined'].includes(c.status)
+  )
+    return false;
+  if (c.run === null) return c.start === null && c.status !== 'observed';
+  if (
+    !validCiRun(c.run) ||
+    c.run.repositoryId !== c.candidate.repositoryId ||
+    c.run.sha !== c.definitionSha ||
+    c.status === 'pending'
+  )
+    return false;
+  const s = c.start;
+  return (
+    s === null ||
+    (exactFields(s, ['claimId', 'runId', 'runAttempt', 'candidate', 'definitionSha', 'state']) &&
+      s.claimId === c.id &&
+      s.runId === c.run.id &&
+      s.runAttempt === c.run.attempt &&
+      sameCandidate(s.candidate, c.candidate) &&
+      s.definitionSha === c.definitionSha &&
+      s.state === 'consumed')
+  );
 }
