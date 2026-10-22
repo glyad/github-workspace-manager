@@ -12,6 +12,7 @@ import {
   validReadinessOperation,
 } from './readiness-operation.mjs';
 const operationOwners = new Map();
+const reviewRoots = new WeakMap();
 /** Local filesystem TEST backend only. No cross-runner/backend selection.
  * Locks have no lease: a crashed holder requires explicit operator recovery.
  * A partial write/corrupt log denies reads; nothing is truncated or refunded.
@@ -418,5 +419,192 @@ export class LocalDurableStore {
       await fs.rmdir(recovery);
       await this.syncDirectory();
     }
+  }
+  // Review funding is explicitly provisioned once by trusted local TEST setup.
+  // The returned identity must be retained separately and rebound on restart.
+  async initializeReviewFunding(fundingScope, limitsDigest) {
+    if (!validId(fundingScope) || !/^[a-f0-9]{64}$/.test(limitsDigest))
+      throw Error('Funding binding');
+    await this.init();
+    const path = join(this.root, `${digest(fundingScope)}.review`);
+    await fs.mkdir(path, { mode: 0o700 });
+    const write = async (name, body) => {
+      const f = await fs.open(join(path, name), 'wx', 0o600);
+      try {
+        await f.writeFile(body);
+        await f.sync();
+      } finally {
+        await f.close();
+      }
+    };
+    const binding = { version: 1, fundingScope, limitsDigest };
+    const rootStat = await fs.stat(this.root),
+      scopeStat = await fs.stat(path);
+    const identity = {
+      ...binding,
+      rootId: randomUUID(),
+      rootDev: rootStat.dev,
+      rootIno: rootStat.ino,
+      scopeDev: scopeStat.dev,
+      scopeIno: scopeStat.ino,
+    };
+    await fs.mkdir(join(path, 'members'), { mode: 0o700 });
+    await fs.mkdir(join(path, 'claims'), { mode: 0o700 });
+    for (const name of ['events.jsonl', 'intents.jsonl']) await write(name, '');
+    await write('identity', JSON.stringify(identity));
+    await write('binding', JSON.stringify(binding));
+    const directory = await fs.open(path, 'r');
+    try {
+      await directory.sync();
+    } finally {
+      await directory.close();
+    }
+    await this.syncDirectory();
+    await this.bindReviewFunding(identity);
+    return structuredClone(identity);
+  }
+  async bindReviewFunding(input) {
+    const identity = structuredClone(input);
+    await this.verifyReviewFunding(identity);
+    reviewRoots.set(this, Object.freeze(identity));
+    return structuredClone(identity);
+  }
+  async verifyReviewFunding(identity = reviewRoots.get(this)) {
+    if (
+      !identity ||
+      !validId(identity.fundingScope) ||
+      !/^[a-f0-9]{64}$/.test(identity.limitsDigest)
+    )
+      throw Error('Retained initialized funding root required');
+    const path = join(this.root, `${digest(identity.fundingScope)}.review`);
+    const rootStat = await fs.stat(this.root),
+      scopeStat = await fs.stat(path);
+    if (
+      rootStat.dev !== identity.rootDev ||
+      rootStat.ino !== identity.rootIno ||
+      scopeStat.dev !== identity.scopeDev ||
+      scopeStat.ino !== identity.scopeIno ||
+      (await fs.readFile(join(path, 'identity'), 'utf8')) !== JSON.stringify(identity) ||
+      (await fs.readFile(join(path, 'binding'), 'utf8')) !==
+        JSON.stringify({
+          version: 1,
+          fundingScope: identity.fundingScope,
+          limitsDigest: identity.limitsDigest,
+        })
+    )
+      throw Error('Missing/replaced funding root');
+    return path;
+  }
+  async withReviewFundingLock(fundingScope, limitsDigest, fn) {
+    const path = await this.verifyReviewFunding();
+    const identity = reviewRoots.get(this);
+    if (identity.fundingScope !== fundingScope || identity.limitsDigest !== limitsDigest)
+      throw Error('Funding configuration changed');
+    const lock = join(path, 'lock');
+    await fs.mkdir(lock, { mode: 0o700 });
+    const d = await fs.open(path, 'r');
+    try {
+      await d.sync();
+    } finally {
+      await d.close();
+    }
+    // Any exception or uncertainty retains the lock. There is no takeover API.
+    const result = await fn();
+    if (result?.kind === 'uncertain') return result;
+    // Successful removal commits release: no fallible work follows it. A crash
+    // before directory persistence may replay the old lock and deny availability;
+    // that conservative stale lock never authorizes takeover or restores capacity.
+    await fs.rmdir(lock);
+    return result;
+  }
+  async readReviewFunding(fundingScope, limitsDigest) {
+    const path = await this.verifyReviewFunding();
+    const identity = reviewRoots.get(this);
+    if (identity.fundingScope !== fundingScope || identity.limitsDigest !== limitsDigest)
+      throw Error('Funding binding mismatch');
+    const body = await fs.readFile(join(path, 'events.jsonl'), 'utf8');
+    const intents = await fs.readFile(join(path, 'intents.jsonl'), 'utf8');
+    if (
+      Buffer.byteLength(body) > 8_000_000 ||
+      Buffer.byteLength(intents) > 8_000_000 ||
+      (body && !body.endsWith('\n')) ||
+      (intents && !intents.endsWith('\n'))
+    )
+      throw Error('Incomplete review history');
+    const lines = body ? body.slice(0, -1).split('\n') : [];
+    const expected = lines.map((line, i) => `${i + 1}-${digest(line)}`);
+    const index = intents ? intents.slice(0, -1).split('\n') : [];
+    const members = await fs.readdir(join(path, 'members'));
+    if (
+      JSON.stringify(expected) !== JSON.stringify(index) ||
+      JSON.stringify([...expected].sort()) !== JSON.stringify(members.sort())
+    )
+      throw Error('Missing review history/index');
+    const rows = lines.map((line) => JSON.parse(line));
+    let previous = '';
+    const claims = new Map();
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      if (row.sequence !== i + 1 || row.previousDigest !== previous)
+        throw Error('Review chain binding');
+      previous = digest(lines[i]);
+      if (row.claim) {
+        if (claims.has(row.claim.id) && claims.get(row.claim.id) !== row.reservation.key)
+          throw Error('Conflicting claim index');
+        claims.set(row.claim.id, row.reservation.key);
+      }
+    }
+    const claimFiles = await fs.readdir(join(path, 'claims'));
+    if (JSON.stringify([...claims.keys()].sort()) !== JSON.stringify(claimFiles.sort()))
+      throw Error('Missing/extra claim index');
+    for (const [id, key] of claims)
+      if ((await fs.readFile(join(path, 'claims', id), 'utf8')) !== key)
+        throw Error('Wrong claim mapping');
+    await this.fault('review-readback', rows.at(-1));
+    return rows;
+  }
+  // Only the ledger's lifecycle code calls this storage primitive under funding.
+  async appendReviewFunding(fundingScope, limitsDigest, input) {
+    const event = structuredClone(input);
+    const path = await this.verifyReviewFunding();
+    const rows = await this.readReviewFunding(fundingScope, limitsDigest);
+    const previous = rows.length ? digest(JSON.stringify(rows.at(-1))) : '';
+    if (event.sequence !== rows.length + 1 || event.previousDigest !== previous)
+      throw Error('Review append chain');
+    const sync = async (directory) => {
+      const d = await fs.open(directory, 'r');
+      try {
+        await d.sync();
+      } finally {
+        await d.close();
+      }
+    };
+    const append = async (name, body, flags = 'a') => {
+      const f = await fs.open(join(path, name), flags, 0o600);
+      try {
+        await f.writeFile(body);
+        await f.sync();
+      } finally {
+        await f.close();
+      }
+    };
+    if (event.claim && !rows.some((r) => r.claim?.id === event.claim.id)) {
+      if (!/^[a-f0-9]{64}$/.test(event.claim.id)) throw Error('Claim index identity');
+      await append(`claims/${event.claim.id}`, event.reservation.key, 'wx');
+      await sync(join(path, 'claims'));
+    }
+    const line = JSON.stringify(event),
+      member = `${event.sequence}-${digest(line)}`;
+    await append('intents.jsonl', member + '\n');
+    await append(`members/${member}`, '', 'wx');
+    await sync(join(path, 'members'));
+    await sync(path);
+    await this.fault('review-before-append', event);
+    await append('events.jsonl', line + '\n');
+    await sync(path);
+    await this.fault('review-after-fsync', event);
+    const after = await this.readReviewFunding(fundingScope, limitsDigest);
+    if (JSON.stringify(after.at(-1)) !== line) throw Error('Review append readback');
+    return event;
   }
 }

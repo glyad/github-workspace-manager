@@ -238,3 +238,64 @@ test('request_change_cannot_reset_same_ready_budget', async () => {
   }
   assert.equal(l.rows.length, 2);
 });
+
+test('local funding facade requires the independently registered exact call origin', async (t) => {
+  const { promises: fs } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { LocalDurableStore } = await import('../../tools/governance/local-durable-store.mjs');
+  const { createLocalReviewLedger, createOfflineReviewOriginAuthority } =
+    await import('../../tools/governance/worker-ledger.mjs');
+  const fixture = await import('./fixtures/review-authority-fixture.mjs');
+  const { digest } = await import('../../tools/governance/journal.mjs');
+  const root = await fs.mkdtemp(join(tmpdir(), 'review-budget-local-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const store = new LocalDurableStore(root);
+  const l = fixture.limits;
+  await store.initializeReviewFunding(
+    'fixture',
+    digest(
+      JSON.stringify([
+        'review-limits-v1',
+        l.callsPerAttempt,
+        l.maxOutputTokens,
+        l.maxInputBytes,
+        l.maxRunSeconds,
+        l.maxConcurrentCalls,
+      ]),
+    ),
+  );
+  const authority = createOfflineReviewOriginAuthority({ registrations: [fixture.registration()] });
+  const local = createLocalReviewLedger({
+    store,
+    fundingScope: 'fixture',
+    approvedLimits: l,
+    originAuthority: authority,
+    observeUnderPrLock: async (c) => fixture.observation(c),
+    verifyOutcome: async () => ({ kind: 'blocked' }),
+  });
+  const c = fixture.candidate,
+    observed = fixture.observation(c);
+  assert.equal(
+    (
+      await reserveReviewBudget(
+        { candidate: c, requestId: 'paid-1', observed },
+        l,
+        local.forOrigin({ verified: true }),
+      )
+    ).kind,
+    'blocked',
+  );
+  const receipt = authority.resolve({ candidate: c, reservationRequestId: 'paid-1' }).value;
+  assert.equal(
+    (
+      await reserveReviewBudget(
+        { candidate: c, requestId: 'paid-1', observed },
+        l,
+        local.forOrigin(receipt),
+      )
+    ).kind,
+    'verified',
+  );
+  assert.equal((await local.withFunding(() => local.read())).value.reservations.length, 1);
+});
