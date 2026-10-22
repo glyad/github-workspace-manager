@@ -45,3 +45,42 @@ test('malformed registration, canonical bytes, definition and full execution den
     assert.throws(() => worker.createOfflineReviewOriginAuthority({ registrations: [r] }));
   }
 });
+
+test('unrelated_real_run_denied and new_request_id_without_registration_denied', () => {
+  const authority = worker.createOfflineReviewOriginAuthority({ registrations: [registration()] });
+  assert.equal(authority.resolve({ candidate, reservationRequestId: 'paid-new' }).kind, 'blocked');
+  assert.equal(
+    authority.resolve({
+      candidate: { ...candidate, head: 'd'.repeat(40) },
+      reservationRequestId: 'paid-1',
+    }).kind,
+    'blocked',
+  );
+  const receipt = authority.resolve({ candidate, reservationRequestId: 'paid-1' }).value;
+  assert.equal(
+    authority.inspect(receipt, {
+      candidate,
+      reservationRequestId: 'paid-1',
+      limits,
+      run: { ...registration().run, id: '999' },
+    }).kind,
+    'blocked',
+  );
+});
+test('resolver_output_mutation_denied and constructor snapshots remain independent', () => {
+  const input = registration(),
+    authority = worker.createOfflineReviewOriginAuthority({ registrations: [input] });
+  const binding = { candidate, reservationRequestId: 'paid-1', limits };
+  const receipt = authority.resolve({ candidate, reservationRequestId: 'paid-1' }).value;
+  const a = authority.inspect(receipt, binding);
+  assert.throws(() => {
+    a.value.run.id = '999';
+  });
+  assert.throws(() => {
+    a.value.approvedDefinition.workflowId = 'untrusted';
+  });
+  input.run.attempt = 2;
+  const b = authority.inspect(receipt, binding);
+  assert.notEqual(a.value, b.value);
+  assert.equal(b.value.run.attempt, 1);
+});

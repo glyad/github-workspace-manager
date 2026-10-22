@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { LocalDurableStore } from './local-durable-store.mjs';
 import { blocked, verified, exactFields, requestId, boundedId } from './contracts.mjs';
 import { digest, sameCandidate, validCandidate, operationKey } from './journal.mjs';
-import { sameExecution } from './worker-results.mjs';
+import { sameExecution, admitReview } from './worker-results.mjs';
 const limitFields = [
   'callsPerAttempt',
   'maxOutputTokens',
@@ -564,8 +564,253 @@ export function createLocalReviewLedger(config) {
     appendReviewEvent,
     inspect,
     verifyOutcome,
+    origin,
     limits,
     owner,
   });
   return ledger;
+}
+
+// Permissions exist only in this process and never in the durable/serialized claim.
+const reviewGuards = new WeakMap();
+function lifecycle(ledger, fn) {
+  const internal = ledgerInternals.get(ledger);
+  return internal
+    ? internal.withFunding(() => internal.owned(() => fn(internal)))
+    : Promise.resolve(blocked('Original local ledger required'));
+}
+function nextEvent(history, previous, kind, claim, outcome) {
+  return {
+    version: 1,
+    sequence: history.events.length + 1,
+    previousDigest: history.events.length ? digest(JSON.stringify(history.events.at(-1))) : '',
+    kind,
+    reservation: {
+      ...previous.reservation,
+      status:
+        kind === 'completed'
+          ? 'completed'
+          : ['unknown', 'contradiction'].includes(kind)
+            ? 'unknown'
+            : 'reserved',
+    },
+    claim,
+    outcome,
+  };
+}
+/** Claim binds only the original provisioned origin. Repeated claims grant nothing. */
+export async function claimReservation(key, options, ledger) {
+  if (
+    !hash(key) ||
+    !exactFields(options, ['originReceipt', 'materialDigest', 'invocationDigest']) ||
+    !hash(options.materialDigest) ||
+    !hash(options.invocationDigest)
+  )
+    return blocked('Exact claim request required');
+  const receipt = options.originReceipt,
+    materialDigest = options.materialDigest,
+    invocationDigest = options.invocationDigest;
+  return lifecycle(ledger, async (i) => {
+    const history = await i.history();
+    i.owner();
+    const previous = history.latest.get(key);
+    if (previous?.kind !== 'reserved') return blocked('Unclaimed reserved slot required');
+    const r = snapshot(previous.reservation);
+    const auth = i.inspect(receipt, {
+      candidate: r.candidate,
+      reservationRequestId: r.requestId,
+      limits: r.limits,
+    });
+    if (auth.kind !== 'verified') return blocked('Original origin required');
+    const run = snapshot(auth.value.run);
+    if (admitReview(r.candidate, await ledger.observe(r.candidate), i.limits).kind !== 'verified')
+      return blocked('Current review admission changed');
+    i.owner();
+    const claim = snapshot({
+      id: claimId(key),
+      reservationKey: key,
+      candidate: r.candidate,
+      requestId: r.requestId,
+      limits: r.limits,
+      run,
+      materialDigest,
+      invocationDigest,
+      start: null,
+    });
+    await i.appendReviewEvent(nextEvent(history, previous, 'claimed', claim, null));
+    i.owner();
+    return verified(claim);
+  });
+}
+/** Persist start under funding then PR; release all locks before executing once. */
+export async function withClaimedReview(id, ledger, execute) {
+  if (!hash(id) || typeof execute !== 'function') return blocked('Claim ID and executor required');
+  const started = await lifecycle(ledger, async (i) => {
+    const read = await ledger.readByClaimId(id);
+    i.owner();
+    if (
+      read.kind !== 'verified' ||
+      !read.value?.claim ||
+      read.value.claim.start !== null ||
+      read.value.reservation.status !== 'reserved'
+    )
+      return blocked('Original unconsumed claim required');
+    const history = await i.history();
+    i.owner();
+    const previous = history.latest.get(read.value.reservation.key);
+    if (previous?.kind !== 'claimed') return blocked('Original claimed phase required');
+    const c = snapshot(read.value.claim);
+    if (admitReview(c.candidate, await ledger.observe(c.candidate), i.limits).kind !== 'verified')
+      return blocked('Current review admission changed');
+    i.owner();
+    const claim = snapshot({ ...c, start: { state: 'consumed', claimId: c.id, run: c.run } });
+    await i.appendReviewEvent(nextEvent(history, previous, 'consumed', claim, null));
+    i.owner();
+    return verified(claim);
+  });
+  if (started.kind !== 'verified') return started;
+  // A lost lock-release/readback response can never reach this point.
+  const guard = Object.freeze(Object.create(null));
+  const state = { claim: started.value, active: true, used: false };
+  reviewGuards.set(guard, state);
+  try {
+    const report = await execute(started.value, guard);
+    return snapshot(report?.kind ? report : verified(report));
+  } catch {
+    state.active = false;
+    await lifecycle(ledger, async (i) => {
+      const history = await i.history();
+      i.owner();
+      const previous = history.latest.get(started.value.reservationKey);
+      if (previous?.kind === 'consumed')
+        await i.appendReviewEvent(nextEvent(history, previous, 'unknown', previous.claim, null));
+      return verified(null);
+    });
+    return uncertain();
+  } finally {
+    state.active = false;
+  }
+}
+/** Validate the complete fake envelope before granting exactly one upstream send. */
+export function consumeReviewGuard(guard, input) {
+  const state = reviewGuards.get(guard);
+  if (!state?.active || state.used) return blocked('Live unconsumed review guard required');
+  try {
+    const c = state.claim;
+    if (
+      !exactFields(input, [
+        'candidate',
+        'materialDigest',
+        'body',
+        'bodyDigest',
+        'inputBytes',
+        'model',
+        'effort',
+        'fresh',
+        'limits',
+      ]) ||
+      !sameCandidate(input.candidate, c.candidate) ||
+      input.materialDigest !== c.materialDigest ||
+      input.bodyDigest !== c.invocationDigest ||
+      !equalLimits(input.limits, c.limits) ||
+      typeof input.body !== 'string' ||
+      !Number.isSafeInteger(input.inputBytes) ||
+      input.inputBytes < 0 ||
+      input.inputBytes > c.limits.maxInputBytes ||
+      Buffer.byteLength(input.body) !== input.inputBytes ||
+      digest(input.body) !== input.bodyDigest ||
+      input.model !== 'gpt-6-astra' ||
+      input.effort !== 'high' ||
+      input.fresh !== true
+    )
+      return blocked('Exact bounded invocation required');
+    const envelope = JSON.parse(input.body);
+    if (
+      !exactFields(envelope, [
+        'version',
+        'model',
+        'effort',
+        'fresh',
+        'tools',
+        'maxOutputTokens',
+        'instructions',
+        'material',
+      ]) ||
+      envelope.version !== 1 ||
+      envelope.model !== input.model ||
+      envelope.effort !== input.effort ||
+      envelope.fresh !== true ||
+      !Array.isArray(envelope.tools) ||
+      envelope.tools.length !== 0 ||
+      envelope.maxOutputTokens !== c.limits.maxOutputTokens ||
+      typeof envelope.instructions !== 'string' ||
+      !envelope.instructions.length ||
+      canonical(envelope) !== input.body ||
+      digest(canonical(envelope.material)) !== c.materialDigest ||
+      !exactFields(envelope.material, ['base', 'head', 'files']) ||
+      envelope.material.base !== c.candidate.base ||
+      envelope.material.head !== c.candidate.head ||
+      !Array.isArray(envelope.material.files)
+    )
+      return blocked('Exact canonical data-only envelope required');
+    state.used = true;
+    return verified(
+      snapshot({
+        claimId: c.id,
+        candidate: c.candidate,
+        run: c.run,
+        materialDigest: c.materialDigest,
+        invocationDigest: c.invocationDigest,
+        limits: c.limits,
+      }),
+    );
+  } catch {
+    return blocked('Exact invocation required');
+  }
+}
+/** Accounting only: authenticates original retained outcome; never observes Ready or sends. */
+export async function settleReservation(key, evidence, ledger) {
+  if (!hash(key) || typeof evidence !== 'string' || Buffer.byteLength(evidence) > 1_000_000)
+    return blocked('Exact retained outcome evidence required');
+  const bytes = evidence;
+  return lifecycle(ledger, async (i) => {
+    const history = await i.history();
+    i.owner();
+    const previous = history.latest.get(key);
+    if (!previous || previous.kind === 'contradiction')
+      return blocked('Original nonquarantined reservation required');
+    const r = snapshot(previous.reservation);
+    // Resolve original authority independently; runtime evidence cannot supply an issuer.
+    const origin = i.origin(r);
+    if (origin.kind !== 'verified') return blocked('Original accounting origin required');
+    const binding = snapshot({
+      reservation: r,
+      claim: previous.claim,
+      outcome: previous.outcome,
+      events: history.events,
+      origin: origin.value,
+    });
+    const resolved = await i.verifyOutcome(bytes, binding);
+    i.owner();
+    if (resolved?.kind !== 'verified') return blocked('Authenticated original outcome required');
+    const outcome = snapshot(resolved.value);
+    if (!validOutcome(outcome, r, previous.claim) || outcome.evidenceDigest !== digest(bytes))
+      return blocked('Exact original outcome binding required');
+    if (previous.kind === 'completed' && same(previous.outcome, outcome)) return verified(r);
+    const kind =
+      previous.kind === 'completed'
+        ? 'contradiction'
+        : outcome.executionEnded && ['not-sent', 'completed'].includes(outcome.providerOutcome)
+          ? 'completed'
+          : 'unknown';
+    if (kind === 'unknown' && outcome.providerOutcome !== 'unknown')
+      return blocked('Incomplete outcome must remain authenticated unknown');
+    const event = nextEvent(history, previous, kind, previous.claim, outcome);
+    await i.appendReviewEvent(event);
+    i.owner();
+    return verified(snapshot(event.reservation));
+  });
+}
+export async function reconcileReservation(key, evidence, ledger) {
+  return settleReservation(key, evidence, ledger);
 }
