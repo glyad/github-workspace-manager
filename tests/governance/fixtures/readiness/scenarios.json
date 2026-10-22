@@ -1,0 +1,8 @@
+{
+  "syntheticOnly": true,
+  "repositoryId": "repo",
+  "pr": 7,
+  "readyAttempt": "ready-2",
+  "supersedingReadyAttempt": "ready-3",
+  "notes": "Local sanitized identifiers; no real actor, Issue, workflow run, credential or live verification."
+}

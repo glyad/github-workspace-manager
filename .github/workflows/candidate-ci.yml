@@ -1,0 +1,57 @@
+name: Candidate CI
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: Exact admitted base SHA; shipping hotfix uses released same-line baseline
+        required: true
+        type: string
+      head:
+        description: Exact admitted head SHA; never a synthetic develop merge ref
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  validate:
+    # Dispatch is NOT admission. Live authenticated Task 6 adapters do not exist.
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Block until trusted workflow revision and current admission are verified
+        run: |
+          echo 'Inactive: dispatcher, native history, durable lock and run/body issuer unimplemented.'
+          exit 1
+      # The following is an unreachable check recipe, not an activated worker.
+      # Live implementation must recheck admission before checkout and completion.
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.base }}
+          path: candidate-base
+          persist-credentials: false
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.head }}
+          path: candidate-head
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+      - name: Actual configured local checks on candidate head
+        working-directory: candidate-head
+        run: |
+          npm ci --ignore-scripts
+          npm run check:local > ../candidate-checks.log 2>&1
+      # Product checks and code scanning must be added when real scripts and a
+      # separately verified scanner exist. Their absence is NOT a passing check.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ always() }}
+        with:
+          name: candidate-ci-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: candidate-checks.log
+          retention-days: 14
+          if-no-files-found: error
+      # No result attestation or governance check is emitted by this template.

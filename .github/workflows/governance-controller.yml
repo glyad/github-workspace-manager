@@ -1,0 +1,29 @@
+name: Governance controller (inactive)
+on:
+  pull_request_target:
+    types: [ready_for_review, synchronize, converted_to_draft, closed, reopened, edited]
+  workflow_run:
+    workflows: [Candidate CI, Candidate review]
+    types: [completed]
+permissions:
+  contents: read
+concurrency:
+  group: governance-pr-${{ github.repository_id }}-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || 'unresolved' }}
+  cancel-in-progress: false
+jobs:
+  controller:
+    # Unreachable until separately reviewed live adapter and identity gates pass.
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+      pull-requests: write
+      checks: write
+    steps:
+      # No checkout, secrets, dispatch, Project token or PR code execution.
+      - name: Fail closed until authenticated live adapters exist
+        run: |
+          echo 'Inactive: trusted ledger, native timeline, run attestation and lock adapters unresolved.'
+          exit 1
