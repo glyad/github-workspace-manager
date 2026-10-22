@@ -1,4 +1,7 @@
-import { admitCandidate, inactivePort } from './admission.mjs';
+import { authenticateReadinessRequest, readinessRequestBinding } from './readiness-request.mjs';
+import { withReadinessOperation } from './readiness-operation.mjs';
+import { runReadinessHandshakeInScope } from './readiness-handshake.mjs';
+import { admitCandidate, admitCandidateInScope, inactivePort } from './admission.mjs';
 import { boundedJson, verifyArchive } from './worker-transport.mjs';
 import { digest } from './journal.mjs';
 import { blocked } from './contracts.mjs';
@@ -60,11 +63,14 @@ export async function handleTrustedWorkerCallback(
     return blocked('Production backend unselected');
   try {
     const raw = boundedJson(body, 262144);
+    // Preserve the independently authenticated callback execution across awaits;
+    // a mutable review mapping cannot rewrite the signed invocation in place.
+    const callbackRun = Object.freeze({ ...expectedRun });
     const proof = verifyArchive(
       archive,
       {
         purpose: 'worker-callback',
-        run: expectedRun,
+        run: callbackRun,
         bodyDigest: digest(body),
         candidate: raw.candidate,
         worker: raw.worker,
@@ -77,7 +83,7 @@ export async function handleTrustedWorkerCallback(
       !['worker_start', 'worker_completed'].includes(raw.type)
     )
       return blocked('Callback binding');
-    if ((await port.verifyWorkerCallback(raw, expectedRun))?.kind !== 'verified')
+    if ((await port.verifyWorkerCallback(raw, callbackRun))?.kind !== 'verified')
       return blocked('Unverified worker mapping');
     const c = raw.candidate;
     return await admitCandidate(port, {
@@ -88,8 +94,65 @@ export async function handleTrustedWorkerCallback(
       candidate: c,
       worker: raw.worker,
       outcome: raw.outcome,
+      claimId: raw.claimId,
+      run: callbackRun,
     });
   } catch {
     return blocked('Malformed worker callback');
+  }
+}
+
+/** Authenticated dispatch request, one durable operation scope, one existing gate.
+ * requestContext and its exact-byte evidence resolver are trusted configuration.
+ */
+export async function handleTrustedReadinessRequest({ body, archive }, context = {}) {
+  if (context.mode !== 'offline-test' || context.productionBackend != null)
+    return blocked('Production backend unselected');
+  try {
+    const authenticated = await authenticateReadinessRequest(body, {
+      ...context.requestContext,
+      verifyRequestEvidence: (exact, bindings) =>
+        context.requestContext.verifyRequestEvidence(exact, bindings, archive),
+    });
+    if (authenticated.kind !== 'verified') return authenticated;
+    const request = Object.freeze({ ...authenticated.value });
+    const port = context.port;
+    const binding = readinessRequestBinding(authenticated);
+    const facade = {
+      ...port.readinessStore,
+      authorizeReadinessRequest: async (q) => {
+        const receipt = await port.readinessStore.authorizeReadinessRequest(q);
+        const checked = readinessRequestBinding(receipt);
+        return checked &&
+          [
+            'id',
+            'attempt',
+            'repositoryId',
+            'actorId',
+            'workflowId',
+            'sha',
+            'executionSha',
+            'ref',
+            'event',
+          ].every((k) => checked.run[k] === binding.run[k])
+          ? receipt
+          : blocked('Invocation receipt changed');
+      },
+    };
+    return await withReadinessOperation(request, facade, async (scope) => {
+      const result = await runReadinessHandshakeInScope(request, port, scope);
+      if (result.kind !== 'verified') return result;
+      const proof = result.value;
+      return admitCandidateInScope(port, {
+        type: 'verified_readiness',
+        repositoryId: request.repositoryId,
+        pr: request.pr,
+        readinessId: proof.witnessId,
+        candidate: proof.candidate,
+        proofDigest: digest(JSON.stringify(proof)),
+      });
+    });
+  } catch {
+    return blocked('Readiness composition unavailable');
   }
 }

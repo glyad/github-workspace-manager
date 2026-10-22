@@ -1,3 +1,4 @@
+import { sameExecution } from './worker-results.mjs';
 import { randomUUID } from 'node:crypto';
 import { digest, parseJournal, sameCandidate, validCandidate } from './journal.mjs';
 import {
@@ -8,6 +9,8 @@ import {
 } from './worker-transport.mjs';
 import { verified, blocked, validReadinessRequest } from './contracts.mjs';
 import { readinessWindowDigest, readinessWindowBindings } from './readiness-handshake.mjs';
+import { readinessRequestBinding } from './readiness-request.mjs';
+import { validReadinessOperation } from './readiness-operation.mjs';
 import { candidateOf } from './controller.mjs';
 const keyOf = (c) => `${c.repositoryId}:${c.pr}`;
 const numeric = (n) => Number.isSafeInteger(n) && n > 0;
@@ -28,6 +31,7 @@ export function createGithubPort({
   controllerRun,
   workerResults,
   workers = {},
+  ciContinuation,
 }) {
   if (
     !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ||
@@ -147,11 +151,14 @@ export function createGithubPort({
     if (typeof store[method] === 'function') readinessStore[method] = store[method].bind(store);
   readinessStore.withPrLock = (key, fn) =>
     store.withPrLock(key, async () => {
+      if ((await store.pending(key)).length) return blocked('Pending durable obligations');
+      active.add(key);
       readinessActive.add(key);
       readinessSent.delete(key);
       try {
         return await fn();
       } finally {
+        active.delete(key);
         readinessActive.delete(key);
         readinessSent.delete(key);
       }
@@ -189,6 +196,17 @@ export function createGithubPort({
       return blocked('Operation evidence authentication unavailable');
     }
   };
+  function validStart(claim) {
+    const start = claim?.start;
+    return (
+      start?.state === 'consumed' &&
+      start.claimId === claim.id &&
+      start.runId === claim.run?.id &&
+      start.runAttempt === claim.run?.attempt &&
+      sameCandidate(start.candidate, claim.candidate) &&
+      start.definitionSha === claim.definitionSha
+    );
+  }
   const port = {
     readinessStore,
     async observeReadinessWindow(input) {
@@ -353,7 +371,143 @@ export function createGithubPort({
         }
       });
     },
+    async observeAdmission(input) {
+      // Resolve only authenticated durable operations, never a payload verified bit.
+      const key = keyOf(input);
+      const all = await store.readObligations?.(key);
+      if (all?.kind !== 'verified' || !Array.isArray(all.value)) return null;
+      const requested = input.requestId ?? input.candidate?.requestId;
+      const operations = all.value.filter(
+        (o) => o.state === 'accepted' && (!requested || o.request.requestId === requested),
+      );
+      if (operations.length !== 1) return null;
+      const operation = operations[0];
+      if (!validReadinessOperation(operation)) throw Error('Invalid durable operation');
+      const authentication = await store.authorizeReadinessRequest?.(operation.request);
+      const binding = readinessRequestBinding(authentication);
+      if (
+        !binding ||
+        Object.keys(operation.request).some((k) => binding.request[k] !== operation.request[k])
+      )
+        throw Error('Request receipt unavailable');
+      const retained = await archive('readiness-admission', {
+        requestId: operation.request.requestId,
+        proofDigest: operation.proofDigest,
+      });
+      if (!retained || digest(retained.body) !== operation.proofDigest)
+        throw Error('Retained proof unavailable');
+      const proofBody = boundedJson(retained.body, 16384);
+      const checked = verifyArchive(
+        retained.envelope,
+        { purpose: 'readiness-proof', run: controllerRun, bodyDigest: operation.proofDigest },
+        publicKey,
+      );
+      const c = proofBody.candidate;
+      const originalAfter = retained.after;
+      if (
+        !originalAfter ||
+        originalAfter.evidenceDigest !== proofBody.afterDigest ||
+        readinessWindowDigest(originalAfter) !== proofBody.afterDigest ||
+        !Array.isArray(originalAfter.events)
+      )
+        throw Error('Retained admitted window unavailable');
+      if (
+        checked.kind !== 'verified' ||
+        JSON.stringify(Object.keys(proofBody).sort()) !==
+          JSON.stringify(
+            [
+              'version',
+              'request',
+              'candidate',
+              'beforeDigest',
+              'afterDigest',
+              'mutationDigest',
+              'witnessId',
+              'originalRunId',
+              'runAttempt',
+              'definitionSha',
+            ].sort(),
+          ) ||
+        proofBody.version !== 2 ||
+        !validCandidate(c) ||
+        c.protocolVersion !== 2 ||
+        !validReadinessRequest(proofBody.request) ||
+        Object.keys(operation.request).some((k) => proofBody.request[k] !== operation.request[k]) ||
+        ['repositoryId', 'pr', 'base', 'head', 'baseRef', 'requestId', 'protocolVersion'].some(
+          (k) => c[k] !== operation.request[k],
+        ) ||
+        c.attempt !== proofBody.witnessId ||
+        proofBody.originalRunId !== operation.request.originalRunId ||
+        proofBody.runAttempt !== binding.run.attempt ||
+        proofBody.definitionSha !== operation.request.definitionSha ||
+        proofBody.beforeDigest !== operation.beforeDigest ||
+        proofBody.mutationDigest !== operation.mutationDigest ||
+        !/^[a-f0-9]{64}$/.test(proofBody.afterDigest)
+      )
+        throw Error('Proof identity mismatch');
+      const read = await port.observeReadinessWindow(operation.request);
+      if (read.kind !== 'verified') throw Error('Current native observation unavailable');
+      const w = read.value;
+      const index = w.events.findIndex((e) => e.id === c.attempt && e.kind === 'ready_for_review');
+      if (index < 0) throw Error('Original native witness absent');
+      const prefixMatches =
+        JSON.stringify(w.events.slice(0, originalAfter.events.length)) ===
+        JSON.stringify(originalAfter.events);
+      const tail = w.events.slice(index + 1);
+      const intervened = tail.some((e) =>
+        [
+          'head_ref_force_pushed',
+          'base_ref_changed',
+          'base_ref_force_pushed',
+          'ready_for_review',
+          'converted_to_draft',
+          'closed',
+          'reopened',
+        ].includes(e.kind),
+      );
+      const latest = [...w.events]
+        .reverse()
+        .find((e) => ['ready_for_review', 'converted_to_draft'].includes(e.kind));
+      const ready = [...w.events].reverse().find((e) => e.kind === 'ready_for_review');
+      const closed = tail.some((e) => e.kind === 'closed');
+      const current = { ...c, base: w.base, head: w.head, baseRef: w.baseRef, attempt: ready?.id };
+      prNodes.set(c.pr, w.prNodeId);
+      if (
+        closed ||
+        (ready?.id === c.attempt && (!prefixMatches || intervened || !sameCandidate(current, c)))
+      )
+        await safety(c, closed ? 'closed' : 'drift');
+      return {
+        repositoryId,
+        pr: c.pr,
+        nodeId: w.prNodeId,
+        base: w.base,
+        head: w.head,
+        baseRef: w.baseRef,
+        state: w.state,
+        draft: w.draft,
+        nativeVerified: true,
+        sameRepository: true,
+        readiness: { id: ready?.id, kind: latest?.kind, candidate: c, candidateVerified: false },
+        lifecycle: { verified: true, attempt: ready?.id, closedSinceReady: closed },
+        admission: {
+          candidate: c,
+          proof: proofBody,
+          proofDigest: operation.proofDigest,
+          verified:
+            prefixMatches &&
+            !intervened &&
+            sameCandidate(current, c) &&
+            w.state === 'open' &&
+            !w.draft &&
+            !closed &&
+            !tail.some((e) => ['ready_for_review', 'converted_to_draft'].includes(e.kind)),
+        },
+      };
+    },
     async observe(input) {
+      const admitted = await port.observeAdmission(input);
+      if (admitted) return admitted;
       if (input.repositoryId !== repositoryId || !numeric(input.pr))
         throw Error('Unrelated observation');
       const { value: p } = await request('GET', `${root}/pulls/${input.pr}`);
@@ -466,7 +620,8 @@ export function createGithubPort({
         },
       );
       const entries = [],
-        records = [];
+        records = [],
+        readinessRequests = [];
       for (const comment of comments) {
         if (
           !numeric(comment.id) ||
@@ -476,6 +631,11 @@ export function createGithubPort({
         )
           throw Error('Edited or untrusted journal');
         const row = boundedJson(comment.body, 16384);
+        if (row.candidate?.protocolVersion === 2) {
+          const op = await store.readOperation?.(row.candidate.requestId);
+          if (op?.kind !== 'verified' || !op.value) throw Error('Journal request unavailable');
+          readinessRequests.push(await store.authorizeReadinessRequest?.(op.value.request));
+        }
         const a = await proof(
           'journal',
           { body: comment.body },
@@ -493,6 +653,7 @@ export function createGithubPort({
         trustedSha: controllerRun.sha,
         repositoryId,
         records,
+        readinessRequests,
       });
     },
     async append(row) {
@@ -523,13 +684,13 @@ export function createGithubPort({
       }
       return verified(row);
     },
-    async draft(c) {
+    async draft(c, admissionIdentity = c) {
       if (!active.has(keyOf(c))) throw Error('Draft requires PR lock');
       const expectedNode = prNodes.get(c.pr);
       if (!expectedNode) throw Error('Missing authenticated PR node identity');
       // Reuse the complete native/provenance observation, including lifecycle
       // and immutable node identity, immediately before the non-atomic mutation.
-      const current = await port.observe(c);
+      const current = await port.observe(admissionIdentity);
       if (
         !sameCandidate(candidateOf(current), c) ||
         current.nodeId !== expectedNode ||
@@ -552,15 +713,85 @@ export function createGithubPort({
         throw Error('Draft outcome uncertain');
       // Controller performs its mandatory post-mutation current-candidate readback.
     },
+    async readCiContinuation(claimId) {
+      return ciContinuation?.readCiContinuation
+        ? ciContinuation.readCiContinuation(claimId)
+        : blocked('CI continuation provider unselected');
+    },
+    async resolveCiContinuation(event) {
+      if (
+        !event ||
+        event.worker !== 'ci' ||
+        event.candidate?.protocolVersion !== 2 ||
+        typeof event.claimId !== 'string'
+      )
+        return blocked('CI claim identity required');
+      const read = await port.readCiContinuation(event.claimId);
+      const claim = read?.value,
+        c = event.candidate;
+      const op = await store.readOperation?.(c.requestId);
+      if (
+        read?.kind !== 'verified' ||
+        !claim ||
+        claim.id !== event.claimId ||
+        claim.worker !== 'ci' ||
+        claim.status !== 'observed' ||
+        claim.requestId !== c.requestId ||
+        !sameCandidate(claim.candidate, c) ||
+        op?.kind !== 'verified' ||
+        op.value?.state !== 'accepted' ||
+        claim.definitionSha !== op.value.request.definitionSha ||
+        !claim.run ||
+        claim.run.sha !== claim.definitionSha ||
+        claim.run.repositoryId !== c.repositoryId ||
+        claim.run.event !== 'workflow_dispatch'
+      )
+        return blocked('Authenticated bound CI claim required');
+      await lookupRun(claim.run);
+      return verified(structuredClone(claim));
+    },
+    async consumeCiStart(claimId, run) {
+      if (!active.has(keyOf((await port.readCiContinuation(claimId))?.value?.candidate ?? {})))
+        return blocked('CI consumption requires held PR lock');
+      return ciContinuation?.consumeCiStart
+        ? ciContinuation.consumeCiStart(claimId, run)
+        : blocked('CI consumption provider unselected');
+    },
     async verifyWorkerCallback(event, callbackRun) {
-      const expected = workers[event.worker];
-      if (!expected || JSON.stringify(expected) !== JSON.stringify(callbackRun))
+      const continuation =
+        event.candidate?.protocolVersion === 2 && event.worker === 'ci'
+          ? await port.resolveCiContinuation(event)
+          : null;
+      const expected = continuation ? continuation.value?.run : workers[event.worker];
+      if (
+        !expected ||
+        (event.candidate?.protocolVersion === 2
+          ? !sameExecution(expected, callbackRun)
+          : JSON.stringify(expected) !== JSON.stringify(callbackRun))
+      )
         throw Error('Unmapped worker callback');
+      if (
+        continuation &&
+        (continuation.kind !== 'verified' ||
+          (event.type === 'worker_completed' && !validStart(continuation.value)))
+      )
+        return blocked('CI start consumption required');
       await lookupRun(expected);
       return verified(expected);
     },
     async verifyWorker(event) {
-      const run = workers[event.worker];
+      const continuation =
+        event.candidate?.protocolVersion === 2 && event.worker === 'ci'
+          ? await port.resolveCiContinuation(event)
+          : null;
+      if (continuation && (continuation.kind !== 'verified' || !validStart(continuation.value)))
+        return blocked('Persisted CI start required');
+      const selectedRun = continuation ? continuation.value?.run : workers[event.worker];
+      // Keep the selected scalar execution independent of mutable provider/mapping
+      // objects across native lookup, result retrieval and envelope verification.
+      const run = selectedRun && Object.freeze({ ...selectedRun });
+      if (event.candidate?.protocolVersion === 2 && !sameExecution(event.run, run))
+        return blocked('Worker completion run mismatch');
       if (!run || !workerResults) throw Error('Worker mapping unselected');
       await lookupRun(run);
       const downloaded = await workerResults(run);
@@ -568,6 +799,7 @@ export function createGithubPort({
         candidate: event.candidate,
         worker: event.worker,
         publicKey,
+        claimId: continuation?.value?.id,
       });
       if (result.kind !== 'verified') throw Error('Worker envelope mismatch');
       const o = await port.observe(event.candidate),
@@ -575,7 +807,7 @@ export function createGithubPort({
       if (journal.kind !== 'verified') throw Error('Worker admission ledger unavailable');
       const rows = journal.value.filter((r) => sameCandidate(r.candidate, event.candidate));
       const observed = {
-        candidate: { repositoryId, pr: o.pr, base: o.base, head: o.head, attempt: o.readiness.id },
+        candidate: candidateOf(o),
         nativeVerified: o.nativeVerified,
         lifecycleVerified: o.lifecycle.verified,
         ready: o.state === 'open' && !o.draft && o.readiness.kind === 'ready_for_review',
@@ -590,6 +822,7 @@ export function createGithubPort({
               ['invalidate', 'draft'].includes(r.action),
           ),
         expectedRun: run,
+        expectedClaimId: continuation?.value?.id,
         expectedWorker: event.worker,
         ci: {
           verified: rows.some((r) => r.action === 'ci-success' && r.phase === 'result'),

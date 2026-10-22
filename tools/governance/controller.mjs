@@ -1,7 +1,12 @@
-import { blocked, verified } from './contracts.mjs';
+import { sameExecution } from './worker-results.mjs';
+import { blocked, verified, exactFields, sha40 } from './contracts.mjs';
 import { sameCandidate, validCandidate, operationKey } from './journal.mjs';
 export function candidateOf(o) {
+  const origin = o.admission?.candidate;
   return {
+    ...(origin?.protocolVersion === 2
+      ? { protocolVersion: 2, requestId: origin.requestId, baseRef: o.baseRef }
+      : {}),
     repositoryId: o.repositoryId,
     pr: o.pr,
     base: o.base,
@@ -10,23 +15,30 @@ export function candidateOf(o) {
   };
 }
 const none = (reason) => ({ action: 'none', reason });
-/** Supplied only by the trusted observation adapter, never by the event payload.
- * It must establish the native Ready transition's event-time base/head, not merely
- * observe the current PR while that Ready event remains the latest attempt.
+/** Admission-time identity comes only from the trusted adapter's authenticated
+ * retained proof and current native window. Legacy origin is safety history only.
  */
 function verifiedReadyOrigin(o, c) {
-  const origin = o.readiness?.candidate;
+  const origin = o.admission?.candidate ?? o.readiness?.candidate;
   return (
-    o.readiness?.candidateVerified === true &&
     validCandidate(origin) &&
+    (origin.protocolVersion === 2
+      ? o.admission?.proof?.version === 2
+      : o.readiness?.candidateVerified === true) &&
     origin.repositoryId === c.repositoryId &&
     origin.pr === c.pr &&
     origin.attempt === c.attempt
   );
 }
 function readyCandidateMatches(o, c) {
-  return verifiedReadyOrigin(o, c) && sameCandidate(o.readiness.candidate, c);
+  return (
+    c.protocolVersion === 2 &&
+    o.admission?.verified === true &&
+    verifiedReadyOrigin(o, c) &&
+    sameCandidate(o.admission.candidate, c)
+  );
 }
+const originOf = (o) => o.admission?.candidate ?? o.readiness?.candidate;
 function verifiedLifecycle(o, c) {
   return (
     o.lifecycle?.verified === true &&
@@ -61,7 +73,12 @@ export function decideReadiness(o, event, journal) {
   const evidenceInvalidated = invalidations.length > 0;
   const admitted = current.some((r) => r.action === 'admit-ci' && r.phase === 'result');
   const success = (action) => current.some((r) => r.action === action && r.phase === 'result');
-  const decision = (action) => ({ action, candidate: c, key: operationKey(c, action) });
+  const decision = (action) => {
+    const original = originOf(o);
+    const identity =
+      c.protocolVersion === 2 && ['draft', 'invalidate'].includes(action) ? original : c;
+    return { action, candidate: identity, target: c, key: operationKey(identity, action) };
+  };
   if (o.lifecycle.closedSinceReady)
     return evidenceInvalidated
       ? none('Closed readiness attempt invalidated')
@@ -69,22 +86,33 @@ export function decideReadiness(o, event, journal) {
   if (o.state !== 'open' || o.draft || o.readiness.kind !== 'ready_for_review')
     return none('Current native Ready required');
   if (event.type === 'synchronize') {
-    if (event.head !== c.head) return none('Superseded synchronization');
-    if (!verifiedReadyOrigin(o, c))
-      return none('Authenticated event-time Ready candidate required');
-    if (o.readiness.candidate.head !== c.head) return decision('draft');
-    if (o.readiness.candidate.base !== c.base && !evidenceInvalidated)
-      return decision('invalidate');
+    if (event.head !== c.head) {
+      // The earlier attempt check rejects unrelated deliveries. A signed head
+      // change for this same attempt remains invalidating evidence after restore;
+      // its stale target can never authorize Draft against the current snapshot.
+      if (
+        c.protocolVersion === 2 &&
+        verifiedReadyOrigin(o, c) &&
+        sha40(event.head) &&
+        !evidenceInvalidated
+      )
+        return decision('invalidate');
+      return none('Superseded synchronization');
+    }
+    if (!verifiedReadyOrigin(o, c)) return none('Authenticated readiness origin required');
+    if (originOf(o).head !== c.head) return decision('draft');
+    if (originOf(o).base !== c.base && !evidenceInvalidated) return decision('invalidate');
     return none('Synchronize never admits CI');
   }
   if (evidenceInvalidated) return none('Attempt evidence invalidated; new Ready required');
-  if (verifiedReadyOrigin(o, c) && !sameCandidate(o.readiness.candidate, c))
-    return decision('invalidate');
-  if (!readyCandidateMatches(o, c))
-    return none(
-      'Candidate drifted since Ready or event-time identity is unverified; require a new Ready cycle',
-    );
-  if (event.type === 'ready_for_review') {
+  if (verifiedReadyOrigin(o, c) && !sameCandidate(originOf(o), c)) return decision('invalidate');
+  if (!readyCandidateMatches(o, c)) return none('Authenticated current v2 admission required');
+  if (
+    event.type === 'verified_readiness' &&
+    c.protocolVersion === 2 &&
+    sameCandidate(event.candidate, c) &&
+    event.proofDigest === o.admission?.proofDigest
+  ) {
     if (
       rows.some(
         (r) =>
@@ -98,7 +126,7 @@ export function decideReadiness(o, event, journal) {
   }
   if (!admitted || !sameCandidate(event.candidate, c)) return none('Missing exact admission');
   if (event.type === 'worker_start') {
-    if (event.worker === 'ci') return decision('start-ci');
+    if (event.worker === 'ci') return { ...decision('start-ci'), event };
     if (event.worker === 'review' && success('ci-success')) return decision('start-review');
   }
   if (
@@ -139,9 +167,10 @@ function matches(o, c, action) {
 export async function reconcileTransition(port, decision) {
   if (!decision || decision.action === 'none') return blocked(decision?.reason || 'No transition');
   const c = decision.candidate;
+  const target = decision.target ?? c;
   const uncertain = (reason) => ({ kind: 'uncertain', reason, evidence: [] });
   const row = (phase) => ({
-    version: 1,
+    version: c.protocolVersion === 2 ? 2 : 1,
     key: decision.key,
     action: decision.action,
     candidate: c,
@@ -176,23 +205,75 @@ export async function reconcileTransition(port, decision) {
       if (!(await persist('result'))) return uncertain('Invalidation result read-back failed');
       return blocked('Observed readiness attempt invalidated; new Ready required');
     }
-    if (!matches(await port.observe(c), c, decision.action))
+    if (!matches(await port.observe(c), target, decision.action))
       return blocked('Candidate changed before transition');
-    if (decision.action.startsWith('start-')) return verified(c);
+    if (decision.action.startsWith('start-')) {
+      if (c.protocolVersion === 2 && decision.action === 'start-ci') {
+        const continuation = await port.resolveCiContinuation?.(decision.event);
+        const claim = continuation?.value;
+        if (
+          continuation?.kind !== 'verified' ||
+          !claim ||
+          claim.id !== decision.event?.claimId ||
+          claim.status !== 'observed' ||
+          claim.start !== null ||
+          claim.worker !== 'ci' ||
+          claim.requestId !== c.requestId ||
+          !sameCandidate(claim.candidate, c) ||
+          !claim.run ||
+          claim.definitionSha !== claim.run.sha ||
+          !sameExecution(claim.run, decision.event?.run)
+        )
+          return blocked('Bound unused CI continuation required');
+        const consumed = await port.consumeCiStart?.(claim.id, claim.run);
+        if (consumed?.kind === 'uncertain') return consumed;
+        const v = consumed?.value;
+        if (
+          consumed?.kind !== 'verified' ||
+          !exactFields(v?.claim, [
+            'id',
+            'candidate',
+            'worker',
+            'requestId',
+            'definitionSha',
+            'status',
+            'run',
+            'start',
+          ]) ||
+          ['id', 'worker', 'requestId', 'definitionSha', 'status'].some(
+            (k) => v.claim[k] !== claim[k],
+          ) ||
+          v?.newlyConsumed !== true ||
+          v.claim?.id !== claim.id ||
+          !sameCandidate(v.claim?.candidate, c) ||
+          !sameExecution(v.claim?.run, claim.run) ||
+          v.claim?.start?.claimId !== claim.id ||
+          v.claim.start.runId !== claim.run.id ||
+          v.claim.start.runAttempt !== claim.run.attempt ||
+          !sameCandidate(v.claim.start.candidate, c) ||
+          v.claim.start.definitionSha !== claim.definitionSha ||
+          v.claim.start.state !== 'consumed'
+        )
+          return blocked('Fresh durable CI start consumption required');
+        if (!matches(await port.observe(c), c, decision.action))
+          return blocked('Candidate changed after consumption; retain claim');
+      }
+      return verified(c);
+    }
     const before = await port.readJournal(c);
     if (before?.kind !== 'verified') return blocked('Ledger unavailable');
     if (before.value.some((r) => r.key === decision.key))
       return blocked('Existing intent requires explicit reconciliation');
     if (!(await persist('intent'))) return uncertain('Intent read-back failed');
-    if (!matches(await port.observe(c), c, decision.action)) {
+    if (!matches(await port.observe(c), target, decision.action)) {
       await persist('quarantine');
       return uncertain('Candidate changed after intent');
     }
     if (decision.action === 'draft') {
-      await port.draft(c);
+      await port.draft(target, c);
       const after = await port.observe(c);
       if (
-        !sameCandidate(candidateOf(after), c) ||
+        !sameCandidate(candidateOf(after), target) ||
         after.draft !== true ||
         !after.nativeVerified ||
         !after.sameRepository ||
@@ -203,12 +284,12 @@ export async function reconcileTransition(port, decision) {
         await persist('quarantine');
         return uncertain('Readiness race: reconcile quarantined attempt; never auto-restore Ready');
       }
-    } else if (!matches(await port.observe(c), c, decision.action)) {
+    } else if (!matches(await port.observe(c), target, decision.action)) {
       await persist('quarantine');
       return uncertain('Candidate changed before result');
     }
     if (!(await persist('result'))) return uncertain('Result read-back failed; work not admitted');
-    if (decision.action !== 'draft' && !matches(await port.observe(c), c, decision.action)) {
+    if (decision.action !== 'draft' && !matches(await port.observe(c), target, decision.action)) {
       await persist('quarantine');
       return uncertain('Candidate changed after result');
     }

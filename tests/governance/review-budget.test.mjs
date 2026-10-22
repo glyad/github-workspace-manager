@@ -210,3 +210,31 @@ test('budget survives base drift within attempt and concurrency spans PRs', asyn
     'blocked',
   );
 });
+
+test('request_change_cannot_reset_same_ready_budget', async () => {
+  const l = ledger();
+  for (let i = 0; i < 3; i++) {
+    const c = {
+      ...candidate,
+      protocolVersion: 2,
+      baseRef: 'refs/heads/develop',
+      requestId: `readiness-${i}`,
+      base: String(i).repeat(40),
+      head: String(i + 1).repeat(40),
+    };
+    const o = {
+      ...observation,
+      candidate: c,
+      ci: { verified: true, candidate: c, outcome: 'success' },
+    };
+    l.observe = async () => o;
+    const result = await reserveReviewBudget(
+      { candidate: c, requestId: `paid-${i}`, observed: o },
+      limits,
+      l,
+    );
+    assert.equal(result.kind, i < 2 ? 'verified' : 'blocked');
+    if (i < 2) l.rows[i].status = 'completed';
+  }
+  assert.equal(l.rows.length, 2);
+});

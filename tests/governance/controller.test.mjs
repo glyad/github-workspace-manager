@@ -10,9 +10,19 @@ const candidate = {
   base: 'a'.repeat(40),
   head: 'b'.repeat(40),
   attempt: 'ready-2',
+  protocolVersion: 2,
+  requestId: 'request-1',
+  baseRef: 'refs/heads/develop',
 };
 const observed = () => ({
   ...candidate,
+  baseRef: candidate.baseRef,
+  admission: {
+    candidate: { ...candidate },
+    proof: { version: 2 },
+    proofDigest: 'proof',
+    verified: true,
+  },
   state: 'open',
   draft: false,
   sameRepository: true,
@@ -25,10 +35,29 @@ const observed = () => ({
     candidate: { ...candidate },
   },
 });
-const ready = { type: 'ready_for_review', readinessId: 'ready-2', repositoryId: 'repo', pr: 7 };
+const ready = {
+  type: 'verified_readiness',
+  candidate,
+  proofDigest: 'proof',
+  claimId: 'claim',
+  run: {
+    id: '1',
+    attempt: 1,
+    sha: 'c'.repeat(40),
+    executionSha: 'c'.repeat(40),
+    actorId: '5',
+    workflowId: '4',
+    repositoryId: 'repo',
+    ref: 'refs/heads/main',
+    event: 'workflow_dispatch',
+  },
+  readinessId: 'ready-2',
+  repositoryId: 'repo',
+  pr: 7,
+};
 const journal = (records = []) => ({ kind: 'verified', value: records, evidence: [] });
 const record = (action, phase = 'result', c = candidate) => ({
-  version: 1,
+  version: c.protocolVersion === 2 ? 2 : 1,
   key: operationKey(c, action),
   candidate: c,
   action,
@@ -68,6 +97,39 @@ function fixture(records = []) {
       state.draft = true;
       state.readiness.kind = 'converted_to_draft';
     },
+    resolveCiContinuation: async (e) =>
+      journal({
+        id: 'claim',
+        candidate: e.candidate,
+        requestId: e.candidate.requestId,
+        worker: 'ci',
+        definitionSha: 'c'.repeat(40),
+        status: 'observed',
+        run: e.run,
+        start: null,
+      }),
+    consumeCiStart: async (_id, run) =>
+      journal({
+        newlyConsumed: true,
+        claim: {
+          id: 'claim',
+          candidate: state.admission.candidate,
+          requestId: state.admission.candidate.requestId,
+          worker: 'ci',
+          definitionSha: run.sha,
+          status: 'observed',
+          run,
+          start: {
+            claimId: 'claim',
+            candidate: state.admission.candidate,
+            definitionSha: run.sha,
+            runId: run.id,
+            runAttempt: run.attempt,
+            state: 'consumed',
+          },
+        },
+      }),
+    verifyWorkerCallback: async (_event, run) => journal(run),
     verifyWorker: async () => ({ kind: 'blocked', reason: 'Unresolved worker provenance' }),
   };
   return {
@@ -75,12 +137,26 @@ function fixture(records = []) {
     rows,
     mutations,
     set: (v) => {
-      state = v;
+      // Trusted adapter fixture authenticates origin separately from current drift.
+      const origin = v.readiness?.candidate ?? candidate;
+      state = {
+        ...v,
+        admission: {
+          candidate: origin,
+          proof: { version: 2 },
+          proofDigest: 'proof',
+          verified:
+            !!v.readiness?.candidateVerified &&
+            ['base', 'head', 'attempt', 'baseRef'].every(
+              (k) => (k === 'attempt' ? v.readiness.id : v[k]) === origin[k],
+            ),
+        },
+      };
     },
     maximum: () => maximum,
   };
 }
-test('only deliberate latest native Ready admits CI', () => {
+test('only authenticated verified readiness admits CI', () => {
   assert.equal(decideReadiness(observed(), ready, journal()).action, 'admit-ci');
   for (const event of [
     { ...ready, type: 'synchronize' },
@@ -434,7 +510,11 @@ test('a fresh deliberate Ready attempt binds and admits its own new candidate', 
       candidate: next,
     },
   });
-  const result = await admitCandidate(f.port, { ...ready, readinessId: 'ready-3' });
+  const result = await admitCandidate(f.port, {
+    ...ready,
+    candidate: next,
+    readinessId: 'ready-3',
+  });
   assert.equal(result.kind, 'verified');
   assert.equal(result.value.attempt, 'ready-3');
   assert.equal(result.value.head, 'd'.repeat(40));
@@ -576,7 +656,7 @@ for (const restore of ['head', 'base'])
         'blocked',
       );
       assert.equal(
-        f.rows.some((r) => r.phase === 'quarantine' && r.candidate.head === moved.head),
+        f.rows.some((r) => r.phase === 'quarantine' && r.candidate.head === candidate.head),
         true,
       );
     });
@@ -602,7 +682,7 @@ test('later genuine Ready survives earlier attempt invalidation and reordered cl
     lifecycle: { verified: true, attempt: 'ready-3', closedSinceReady: false },
   });
   assert.equal((await admitCandidate(f.port, { ...ready, type: 'closed' })).kind, 'blocked');
-  const nextReady = { ...ready, readinessId: 'ready-3' };
+  const nextReady = { ...ready, candidate: next, readinessId: 'ready-3' };
   assert.equal((await admitCandidate(f.port, nextReady)).kind, 'verified');
   assert.equal(
     (
@@ -650,7 +730,7 @@ test('later Ready remains eligible after prior head quarantine and delayed synch
     'blocked',
   );
   assert.equal(
-    (await admitCandidate(f.port, { ...ready, readinessId: 'ready-3' })).kind,
+    (await admitCandidate(f.port, { ...ready, candidate: next, readinessId: 'ready-3' })).kind,
     'verified',
   );
   assert.equal(
@@ -761,7 +841,9 @@ for (const field of ['head', 'base'])
     assert.equal(
       f.rows.some(
         (r) =>
-          r.action === 'invalidate' && r.phase === 'result' && r.candidate[field] === moved[field],
+          r.action === 'invalidate' &&
+          r.phase === 'result' &&
+          r.candidate[field] === candidate[field],
       ),
       true,
     );
@@ -814,7 +896,7 @@ test('old observed invalidation persists without mutating a Ready attempt that a
     true,
   );
   assert.equal(
-    (await admitCandidate(f.port, { ...ready, readinessId: next.attempt })).kind,
+    (await admitCandidate(f.port, { ...ready, candidate: next, readinessId: next.attempt })).kind,
     'verified',
   );
   assert.equal(
@@ -869,7 +951,7 @@ test('completed invalidation cannot let an in-flight synchronize mutate a later 
   );
   assert.equal(f.mutations.length, 0);
   assert.equal(
-    (await admitCandidate(f.port, { ...ready, readinessId: next.attempt })).kind,
+    (await admitCandidate(f.port, { ...ready, candidate: next, readinessId: next.attempt })).kind,
     'verified',
   );
 });

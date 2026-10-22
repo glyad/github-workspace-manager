@@ -138,7 +138,12 @@ test('rejects worker substitution and unbounded result bodies despite matching s
 test('worker v2 candidate result preserves full identity and rejects legacy promotion', async () => {
   const { encodeWorkerResult } = await import('../../tools/governance/worker-transport.mjs');
   const v2 = { ...c, baseRef: 'refs/heads/develop', requestId: 'request-1', protocolVersion: 2 };
-  const body = encodeWorkerResult({ candidate: v2, worker: 'ci', outcome: 'success' });
+  const body = encodeWorkerResult({
+    candidate: v2,
+    worker: 'ci',
+    outcome: 'success',
+    claimId: 'claim-1',
+  });
   assert.deepEqual(JSON.parse(body).candidate, v2);
   assert.throws(() =>
     encodeWorkerResult({
@@ -161,7 +166,12 @@ test('v2 exact-byte worker envelopes authenticate full identity and never upgrad
     protocolVersion: 2,
   };
   const workerRun = { ...run, actorId: 'worker', executionSha: run.sha, ref: 'refs/heads/main' };
-  const body = encodeWorkerResult({ candidate, worker: 'ci', outcome: 'success' });
+  const body = encodeWorkerResult({
+    candidate,
+    worker: 'ci',
+    outcome: 'success',
+    claimId: 'claim-1',
+  });
   const archive = {
     version: 2,
     purpose: 'worker-result',
@@ -175,7 +185,8 @@ test('v2 exact-byte worker envelopes authenticate full identity and never upgrad
     return { body, signature: sign(null, Buffer.from(body), privateKey).toString('base64') };
   };
   assert.equal(
-    verifyResultEnvelope(body, envelope(archive), workerRun, candidate, 'ci', publicKey).kind,
+    verifyResultEnvelope(body, envelope(archive), workerRun, candidate, 'ci', publicKey, 'claim-1')
+      .kind,
     'verified',
   );
   for (const patch of [
@@ -195,7 +206,15 @@ test('v2 exact-byte worker envelopes authenticate full identity and never upgrad
       'blocked',
     );
   assert.equal(
-    verifyResultEnvelope(body + ' ', envelope(archive), workerRun, candidate, 'ci', publicKey).kind,
+    verifyResultEnvelope(
+      body + ' ',
+      envelope(archive),
+      workerRun,
+      candidate,
+      'ci',
+      publicKey,
+      'claim-1',
+    ).kind,
     'blocked',
   );
   assert.equal(
@@ -206,6 +225,7 @@ test('v2 exact-byte worker envelopes authenticate full identity and never upgrad
       candidate,
       'ci',
       publicKey,
+      'claim-1',
     ).kind,
     'blocked',
   );
@@ -221,7 +241,15 @@ test('v2 exact-byte worker envelopes authenticate full identity and never upgrad
     'verified',
   );
   assert.equal(
-    verifyResultEnvelope(legacyBody, envelope(legacy), workerRun, candidate, 'ci', publicKey).kind,
+    verifyResultEnvelope(
+      legacyBody,
+      envelope(legacy),
+      workerRun,
+      candidate,
+      'ci',
+      publicKey,
+      'claim-1',
+    ).kind,
     'blocked',
   );
 });

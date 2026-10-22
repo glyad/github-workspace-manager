@@ -5,20 +5,34 @@ import { mkdtemp, appendFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
+import { admitCandidate } from '../../tools/governance/admission.mjs';
+import { authenticateReadinessRequest } from '../../tools/governance/readiness-request.mjs';
+import { readinessWindowDigest } from '../../tools/governance/readiness-handshake.mjs';
+import { verified } from '../../tools/governance/contracts.mjs';
 import { digest, operationKey } from '../../tools/governance/journal.mjs';
 import { LocalDurableStore } from '../../tools/governance/local-durable-store.mjs';
 import { createGithubPort } from '../../tools/governance/github-port.mjs';
 import {
-  handleTrustedEvent,
+  handleTrustedEvent as handleNativeEvent,
   handleTrustedWorkerCallback,
 } from '../../tools/governance/controller-runtime.mjs';
 import {
   encodeWorkerResult,
   verifyResultEnvelope,
   resultDecision,
+  verifyArchive,
 } from '../../tools/governance/worker-transport.mjs';
 const { publicKey, privateKey } = generateKeyPairSync('ed25519');
-const c = { repositoryId: '1', pr: 2, base: 'a'.repeat(40), head: 'b'.repeat(40), attempt: '10' };
+const c = {
+  repositoryId: '1',
+  pr: 2,
+  base: 'a'.repeat(40),
+  head: 'b'.repeat(40),
+  attempt: '10',
+  protocolVersion: 2,
+  requestId: 'request-1',
+  baseRef: 'refs/heads/develop',
+};
 const run = {
   id: '3',
   attempt: 1,
@@ -31,17 +45,19 @@ const run = {
   ref: 'refs/heads/main',
 };
 const signed = (a) => {
-  const body = JSON.stringify({ version: 1, ...a });
+  const body = JSON.stringify({ version: a.candidate?.protocolVersion === 2 ? 2 : 1, ...a });
   return { body, signature: sign(null, Buffer.from(body), privateKey).toString('base64') };
 };
 const workerRun = { ...run, id: '6', workflowId: '8', event: 'workflow_dispatch' };
-const timeline = [{ id: 10, event: 'ready_for_review', created_at: '2026-01-01T00:00:00Z' }];
+const timeline = [
+  { id: 10, actor: { id: 5 }, event: 'ready_for_review', created_at: '2026-01-01T00:00:00Z' },
+];
 const snapshot = () => ({
   number: 2,
   node_id: 'PR_2',
   state: 'open',
   draft: false,
-  base: { sha: c.base, repo: { id: 1 } },
+  base: { sha: c.base, ref: 'develop', repo: { id: 1 } },
   head: { sha: c.head, repo: { id: 1 } },
 });
 async function fixture(
@@ -51,17 +67,137 @@ async function fixture(
     pr = snapshot(),
     proof = true,
     modify = () => {},
-    workerResult = { candidate: c, worker: 'ci', outcome: 'success' },
+    workerResult = { candidate: c, worker: 'ci', outcome: 'success', claimId: 'claim-1' },
   } = {},
 ) {
   const dir = await mkdtemp(join(tmpdir(), 'bridge-'));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const store = new LocalDurableStore(dir);
+  const request = {
+    protocolVersion: 2,
+    requestId: c.requestId,
+    repositoryId: c.repositoryId,
+    pr: c.pr,
+    prNodeId: 'PR_2',
+    baseRef: c.baseRef,
+    base: c.base,
+    head: c.head,
+    initiatingActorId: '9',
+    originalRunId: '12',
+    workflowId: run.workflowId,
+    definitionSha: run.sha,
+  };
+  const dispatchRun = {
+    ...run,
+    id: '12',
+    actorId: '9',
+    event: 'workflow_dispatch',
+    executionSha: run.sha,
+  };
+  store.authorizeReadinessRequest = async (q) =>
+    authenticateReadinessRequest(JSON.stringify(q), {
+      runId: '12',
+      runAttempt: 1,
+      authorizedActorIds: ['9'],
+      approvedDefinition: Object.freeze({
+        repositoryId: '1',
+        workflowId: run.workflowId,
+        sha: run.sha,
+        ref: run.ref,
+      }),
+      lookupRun: async () => verified(dispatchRun),
+      resolvePr: async () => verified({ repositoryId: '1', pr: 2, prNodeId: 'PR_2' }),
+      verifyRequestEvidence: async (body) =>
+        verified({
+          bodyDigest: digest(body),
+          originalRunId: '12',
+          runAttempt: 1,
+          definitionSha: run.sha,
+          triggeringActorId: '9',
+        }),
+    });
+  const originalAfter = {
+    repositoryId: '1',
+    pr: 2,
+    prNodeId: 'PR_2',
+    state: 'open',
+    draft: false,
+    baseRef: c.baseRef,
+    base: c.base,
+    head: c.head,
+    events: timeline.map((e) => ({ id: String(e.id), kind: e.event, actorId: '5' })),
+    complete: true,
+    order: 'native',
+    nativeDigest: digest(JSON.stringify({ p: snapshot(), events: timeline })),
+  };
+  originalAfter.evidenceDigest = readinessWindowDigest(originalAfter);
+  const retainedProof = {
+    version: 2,
+    request,
+    candidate: c,
+    beforeDigest: '1'.repeat(64),
+    afterDigest: originalAfter.evidenceDigest,
+    mutationDigest: '3'.repeat(64),
+    witnessId: c.attempt,
+    originalRunId: '12',
+    runAttempt: 1,
+    definitionSha: run.sha,
+  };
+  const proofBody = JSON.stringify(retainedProof),
+    proofDigest = digest(proofBody);
+  await store.withPrLock('1:2', async () => {
+    let o = {
+      version: 2,
+      request,
+      state: 'intent',
+      beforeDigest: null,
+      mutationDigest: null,
+      proofDigest: null,
+      continuation: null,
+    };
+    assert.equal((await store.appendOperation(o)).kind, 'verified');
+    for (const patch of [
+      { state: 'mutation-pending' },
+      { state: 'mutation-pending', beforeDigest: retainedProof.beforeDigest },
+      { state: 'mutation-observed', mutationDigest: retainedProof.mutationDigest },
+      { state: 'accepted', proofDigest },
+    ]) {
+      o = { ...o, ...patch };
+      assert.equal((await store.appendOperation(o)).kind, 'verified');
+    }
+  });
+  const claim = {
+    id: 'claim-1',
+    candidate: c,
+    worker: 'ci',
+    requestId: c.requestId,
+    definitionSha: workerRun.sha,
+    status: 'observed',
+    run: workerRun,
+    start:
+      workerResult.outcome === 'failure'
+        ? {
+            claimId: 'claim-1',
+            candidate: c,
+            definitionSha: workerRun.sha,
+            runId: workerRun.id,
+            runAttempt: workerRun.attempt,
+            state: 'consumed',
+          }
+        : null,
+  };
   const comments = [];
   const calls = [];
   const records = new Map();
   const archive = async (purpose, input) => {
     if (!proof) return null;
+    if (purpose === 'readiness-admission')
+      return {
+        body: proofBody,
+        envelope: signed({ purpose: 'readiness-proof', run, bodyDigest: proofDigest }),
+        after: originalAfter,
+      };
+    if (purpose === 'readiness-observation') return signed({ purpose, run, ...input.bindings });
     if (purpose === 'native-history')
       return signed({
         purpose,
@@ -128,37 +264,88 @@ async function fixture(
     modify(req, response);
     return response;
   };
-  return {
-    port: createGithubPort({
-      http,
-      archive,
-      publicKey,
-      store,
-      repository: 'o/r',
-      repositoryId: '1',
-      ledgerNumber: 7,
-      ledgerId: '7',
-      controllerRun: run,
-      workers: { ci: workerRun },
-      workerResults: async () => {
-        const body = encodeWorkerResult(workerResult);
-        return {
-          body,
-          envelope: signed({
-            purpose: 'worker-result',
-            run: workerRun,
-            candidate: c,
-            worker: 'ci',
-            bodyDigest: digest(body),
-          }),
+  const port = createGithubPort({
+    http,
+    archive,
+    publicKey,
+    store,
+    repository: 'o/r',
+    repositoryId: '1',
+    ledgerNumber: 7,
+    ledgerId: '7',
+    controllerRun: run,
+    ciContinuation: {
+      readCiContinuation: async () => verified(structuredClone(claim)),
+      consumeCiStart: async () => {
+        if (claim.start) return verified({ newlyConsumed: false, claim });
+        claim.start = {
+          claimId: claim.id,
+          runId: workerRun.id,
+          runAttempt: workerRun.attempt,
+          candidate: c,
+          definitionSha: workerRun.sha,
+          state: 'consumed',
         };
+        return verified({ newlyConsumed: true, claim: structuredClone(claim) });
       },
-    }),
+    },
+    workers: { ci: workerRun },
+    workerResults: async () => {
+      const body = encodeWorkerResult({ ...workerResult, claimId: claim.id });
+      return {
+        body,
+        envelope: signed({
+          purpose: 'worker-result',
+          run: workerRun,
+          candidate: c,
+          worker: 'ci',
+          bodyDigest: digest(body),
+        }),
+      };
+    },
+  });
+  port.fixtureProofDigest = proofDigest;
+  return {
+    port,
     store,
     calls,
     comments,
     dir,
   };
+}
+// Positive runtime regressions begin with a separately authenticated retained v2
+// operation. Metadata alone is tested through handleNativeEvent below.
+async function admitRetainedFixture(input, context) {
+  const native = await handleNativeEvent(input, context);
+  if (
+    verifyArchive(
+      input.archive,
+      { purpose: 'controller-event', run: context?.expectedRun, bodyDigest: digest(input.body) },
+      publicKey,
+    ).kind !== 'verified'
+  )
+    return native;
+  if (
+    context?.mode !== 'offline-test' ||
+    !input.archive ||
+    JSON.parse(input.archive.body).bodyDigest !== digest(input.body)
+  )
+    return native;
+  const raw = JSON.parse(input.body),
+    envelope = JSON.parse(input.archive.body);
+  if (
+    raw.action !== 'ready_for_review' ||
+    JSON.stringify(envelope.run) !== JSON.stringify(context.expectedRun)
+  )
+    return native;
+  return admitCandidate(context.port, {
+    type: 'verified_readiness',
+    repositoryId: '1',
+    pr: 2,
+    readinessId: c.attempt,
+    candidate: c,
+    proofDigest: context.port.fixtureProofDigest,
+  });
 }
 test('concrete bridge admits exact Ready through existing policy and journal readback', async (t) => {
   const { port, comments } = await fixture(t);
@@ -174,7 +361,7 @@ test('concrete bridge admits exact Ready through existing policy and journal rea
     readinessId: '10',
     bodyDigest: digest(body),
   });
-  const result = await handleTrustedEvent(
+  const result = await admitRetainedFixture(
     { body, archive },
     { port, expectedRun: run, publicKey, mode: 'offline-test' },
   );
@@ -182,7 +369,7 @@ test('concrete bridge admits exact Ready through existing policy and journal rea
   assert.equal(comments.length, 2);
 });
 test('production default denies without invoking injected HTTP', async () => {
-  const r = await handleTrustedEvent(
+  const r = await admitRetainedFixture(
     { body: '{}' },
     {
       port: {
@@ -215,8 +402,14 @@ test('event exact body and definition substitution denied before any observation
     },
   ])
     assert.equal(
-      (await handleTrustedEvent(input, { port, expectedRun: run, publicKey, mode: 'offline-test' }))
-        .kind,
+      (
+        await admitRetainedFixture(input, {
+          port,
+          expectedRun: run,
+          publicKey,
+          mode: 'offline-test',
+        })
+      ).kind,
       'blocked',
     );
   assert.equal(calls.length, 0);
@@ -228,8 +421,8 @@ test('native proof missing denies rather than trusting snapshot or booleans', as
 test('history validates Ready origin and closure survives reopen', async (t) => {
   const events = [
     ...timeline,
-    { id: 11, event: 'closed', created_at: '2026-01-02T00:00:00Z' },
-    { id: 12, event: 'reopened', created_at: '2026-01-03T00:00:00Z' },
+    { id: 11, event: 'closed', actor: { id: 5 }, created_at: '2026-01-02T00:00:00Z' },
+    { id: 12, event: 'reopened', actor: { id: 5 }, created_at: '2026-01-03T00:00:00Z' },
   ];
   const { port, store } = await fixture(t, { events });
   const o = await port.observe(c);
@@ -302,7 +495,7 @@ test('separate process cannot enter held local lock; no timeout reclaim', async 
   assert.deepEqual(await store.read('x'), []);
 });
 test('result protocol composes existing Task7 policy and rejects changed bytes/run', () => {
-  const result = { candidate: c, worker: 'ci', outcome: 'failure' };
+  const result = { candidate: c, worker: 'ci', outcome: 'failure', claimId: 'claim-1' };
   const body = encodeWorkerResult(result);
   const envelope = signed({
     purpose: 'worker-result',
@@ -320,15 +513,24 @@ test('result protocol composes existing Task7 policy and rejects changed bytes/r
     invalidated: false,
     sameRepository: true,
     expectedWorker: 'ci',
+    expectedClaimId: 'claim-1',
     expectedRun: workerRun,
   };
   assert.equal(resultDecision(c, workerRun, result, observed, envelope, publicKey).action, 'draft');
   assert.equal(
-    verifyResultEnvelope(body + ' ', envelope, workerRun, c, 'ci', publicKey).kind,
+    verifyResultEnvelope(body + ' ', envelope, workerRun, c, 'ci', publicKey, 'claim-1').kind,
     'blocked',
   );
   assert.equal(
-    verifyResultEnvelope(body, envelope, { ...workerRun, attempt: 2 }, c, 'ci', publicKey).kind,
+    verifyResultEnvelope(
+      body,
+      envelope,
+      { ...workerRun, attempt: 2 },
+      c,
+      'ci',
+      publicKey,
+      'claim-1',
+    ).kind,
     'blocked',
   );
 });
@@ -339,7 +541,7 @@ test('unknown append outcome keeps durable obligation across restart', async (t)
     },
   });
   const row = {
-    version: 1,
+    version: 2,
     candidate: c,
     action: 'invalidate',
     phase: 'intent',
@@ -379,7 +581,7 @@ test('forged worker run metadata and journal body edits deny', async (t) => {
     });
     assert.notEqual(
       (
-        await handleTrustedEvent(
+        await admitRetainedFixture(
           { body, archive },
           { port, expectedRun: run, publicKey, mode: 'offline-test' },
         )
@@ -419,7 +621,7 @@ test('trusted worker start/completion use same admitted Task6 gate and Task7 pol
   });
   assert.equal(
     (
-      await handleTrustedEvent(
+      await admitRetainedFixture(
         { body, archive },
         { port, expectedRun: run, publicKey, mode: 'offline-test' },
       )
@@ -429,6 +631,7 @@ test('trusted worker start/completion use same admitted Task6 gate and Task7 pol
   for (const type of ['worker_start', 'worker_completed']) {
     const b = JSON.stringify({
       type,
+      claimId: 'claim-1',
       candidate: c,
       worker: 'ci',
       outcome: 'success',
@@ -484,7 +687,7 @@ test('current authenticated worker failure returns exact admitted candidate to D
   });
   assert.equal(
     (
-      await handleTrustedEvent(
+      await admitRetainedFixture(
         { body, archive },
         { port, expectedRun: run, publicKey, mode: 'offline-test' },
       )
@@ -492,6 +695,7 @@ test('current authenticated worker failure returns exact admitted candidate to D
     'verified',
   );
   const b = JSON.stringify({
+    claimId: 'claim-1',
     type: 'worker_completed',
     candidate: c,
     worker: 'ci',
@@ -516,7 +720,7 @@ test('current authenticated worker failure returns exact admitted candidate to D
   assert.equal(pr.draft, true);
 });
 test('archive rejects candidate-body, event and run-attempt substitutions', () => {
-  const result = { candidate: c, worker: 'ci', outcome: 'success' };
+  const result = { candidate: c, worker: 'ci', outcome: 'success', claimId: 'claim-1' };
   const body = encodeWorkerResult(result);
   const envelope = signed({
     purpose: 'worker-result',
@@ -530,7 +734,10 @@ test('archive rejects candidate-body, event and run-attempt substitutions', () =
     { ...workerRun, sha: 'f'.repeat(40) },
     { ...workerRun, attempt: 3 },
   ])
-    assert.equal(verifyResultEnvelope(body, envelope, altered, c, 'ci', publicKey).kind, 'blocked');
+    assert.equal(
+      verifyResultEnvelope(body, envelope, altered, c, 'ci', publicKey, 'claim-1').kind,
+      'blocked',
+    );
   const changed = { ...result, candidate: { ...c, attempt: '11' } };
   assert.equal(
     verifyResultEnvelope(
@@ -540,6 +747,7 @@ test('archive rejects candidate-body, event and run-attempt substitutions', () =
       changed.candidate,
       'ci',
       publicKey,
+      'claim-1',
     ).kind,
     'blocked',
   );
@@ -562,7 +770,7 @@ test('runtime returned uncertainty before WAL retains lock and blocks fresh hold
     readinessId: '10',
     bodyDigest: digest(body),
   });
-  const first = await handleTrustedEvent(
+  const first = await admitRetainedFixture(
     { body, archive },
     { port, expectedRun: run, publicKey, mode: 'offline-test' },
   );
@@ -575,7 +783,7 @@ test('runtime returned uncertainty before WAL retains lock and blocks fresh hold
     { code: 'EEXIST' },
   );
   store.append = originalAppend;
-  const replay = await handleTrustedEvent(
+  const replay = await admitRetainedFixture(
     { body, archive },
     { port, expectedRun: run, publicKey, mode: 'offline-test' },
   );
@@ -646,7 +854,7 @@ test('runtime Draft refuses already observed final-read candidate or PR identity
       });
       assert.equal(
         (
-          await handleTrustedEvent(
+          await admitRetainedFixture(
             { body, archive },
             { port, expectedRun: run, publicKey, mode: 'offline-test' },
           )
@@ -654,6 +862,7 @@ test('runtime Draft refuses already observed final-read candidate or PR identity
         'verified',
       );
       const b = JSON.stringify({
+        claimId: 'claim-1',
         type: 'worker_completed',
         candidate: c,
         worker: 'ci',
@@ -695,7 +904,7 @@ test('runtime Draft refuses new native attempt or closure visible at final read'
             if (row.action === 'draft' && row.phase === 'intent') draftIntent = true;
           }
           if (q.path.endsWith('/pulls/2') && draftIntent && ++readsAfterIntent === 2)
-            events.push({ id: 13, event, created_at: '2026-01-02T00:00:00Z' });
+            events.push({ id: 13, actor: { id: 5 }, event, created_at: '2026-01-02T00:00:00Z' });
         },
       });
       const body = JSON.stringify({
@@ -711,7 +920,7 @@ test('runtime Draft refuses new native attempt or closure visible at final read'
       });
       assert.equal(
         (
-          await handleTrustedEvent(
+          await admitRetainedFixture(
             { body, archive },
             { port, expectedRun: run, publicKey, mode: 'offline-test' },
           )
@@ -719,6 +928,7 @@ test('runtime Draft refuses new native attempt or closure visible at final read'
         'verified',
       );
       const b = JSON.stringify({
+        claimId: 'claim-1',
         type: 'worker_completed',
         candidate: c,
         worker: 'ci',
@@ -754,7 +964,7 @@ test('public runtime and result verifier bound malformed signature before base64
     readinessId: '10',
     bodyDigest: digest(body),
   });
-  const result = { candidate: c, worker: 'ci', outcome: 'success' };
+  const result = { candidate: c, worker: 'ci', outcome: 'success', claimId: 'claim-1' };
   const resultBody = encodeWorkerResult(result);
   const resultArchive = signed({
     purpose: 'worker-result',
@@ -781,7 +991,7 @@ test('public runtime and result verifier bound malformed signature before base64
     for (const signature of invalid) {
       assert.equal(
         (
-          await handleTrustedEvent(
+          await admitRetainedFixture(
             { body, archive: { ...archive, signature } },
             { port, expectedRun: run, publicKey, mode: 'offline-test' },
           )
@@ -824,7 +1034,7 @@ test('runtime failed-worker uncertainty before WAL survives restart and denies l
   });
   assert.equal(
     (
-      await handleTrustedEvent(
+      await admitRetainedFixture(
         { body, archive },
         { port, expectedRun: run, publicKey, mode: 'offline-test' },
       )
@@ -832,7 +1042,7 @@ test('runtime failed-worker uncertainty before WAL survives restart and denies l
     'verified',
   );
   const call = async (type, outcome) => {
-    const b = JSON.stringify({ type, candidate: c, worker: 'ci', outcome });
+    const b = JSON.stringify({ type, claimId: 'claim-1', candidate: c, worker: 'ci', outcome });
     const a = signed({
       purpose: 'worker-callback',
       run: workerRun,

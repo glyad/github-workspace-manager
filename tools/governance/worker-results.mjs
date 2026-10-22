@@ -1,4 +1,4 @@
-import { blocked, verified } from './contracts.mjs';
+import { blocked, verified, exactFields, validBaseRef } from './contracts.mjs';
 import { digest, sameCandidate, validCandidate } from './journal.mjs';
 const none = (reason) => ({ action: 'none', reason });
 const runKeys = ['id', 'attempt', 'repositoryId', 'workflowId', 'sha', 'event'];
@@ -13,6 +13,31 @@ const validRun = (r) =>
   /^[a-f0-9]{40}$/.test(r.sha) &&
   r.event === 'workflow_dispatch';
 const sameRun = (a, b) => validRun(a) && validRun(b) && runKeys.every((k) => a[k] === b[k]);
+const executionFields = [
+  'id',
+  'attempt',
+  'repositoryId',
+  'actorId',
+  'workflowId',
+  'sha',
+  'executionSha',
+  'ref',
+  'event',
+];
+export function sameExecution(a, b) {
+  return (
+    validRun(a) &&
+    validRun(b) &&
+    exactFields(a, executionFields) &&
+    exactFields(b, executionFields) &&
+    ['repositoryId', 'actorId', 'workflowId'].every(
+      (k) => typeof a[k] === 'string' && a[k].length > 0 && a[k].length <= 128,
+    ) &&
+    /^[a-f0-9]{40}$/.test(a.executionSha) &&
+    validBaseRef(a.ref) &&
+    executionFields.every((k) => a[k] === b[k])
+  );
+}
 /** These facts MUST come from the Task 6 authenticated admission adapter under
  * its shared PR lock. Raw event payloads, artifact fields and PR text are not facts.
  * This policy does not create attestations, verify GitHub transport or mutate PRs.
@@ -73,6 +98,12 @@ export function acceptWorkerResult(candidate, runIdentity, result, observed) {
       return none('Stale or unadmitted candidate');
     if (
       observed.expectedWorker !== result.worker ||
+      (candidate.protocolVersion === 2 &&
+        (!sameExecution(runIdentity, observed.expectedRun) ||
+          !sameExecution(runIdentity, observed.attestation?.run) ||
+          (result.worker === 'ci' &&
+            (typeof observed.expectedClaimId !== 'string' ||
+              result.claimId !== observed.expectedClaimId)))) ||
       !sameRun(runIdentity, observed.expectedRun) ||
       runIdentity.repositoryId !== candidate.repositoryId ||
       observed.attestation?.verified !== true ||
