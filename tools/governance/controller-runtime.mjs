@@ -52,12 +52,32 @@ export async function handleTrustedEvent(
     // Attempt identity comes from the authenticated archived delivery, not body assertions.
     if (typeof proof.value.readinessId !== 'string')
       return blocked('Missing native event identity');
+    // Retain supplied candidate observations from the authenticated exact body.
+    // GitHub's base.ref is a short branch name; policy uses the canonical ref.
+    const observed = {};
+    if (Object.hasOwn(pr, 'head')) {
+      if (!sha40(pr.head?.sha)) return blocked('Malformed candidate observation');
+      observed.head = pr.head.sha;
+    }
+    if (Object.hasOwn(pr, 'base')) {
+      if (!pr.base || typeof pr.base !== 'object' || Array.isArray(pr.base))
+        return blocked('Malformed candidate observation');
+      if (Object.hasOwn(pr.base, 'sha')) {
+        if (!sha40(pr.base.sha)) return blocked('Malformed candidate observation');
+        observed.base = pr.base.sha;
+      }
+      if (Object.hasOwn(pr.base, 'ref')) {
+        if (typeof pr.base.ref !== 'string' || !validBaseRef(`refs/heads/${pr.base.ref}`))
+          return blocked('Malformed candidate observation');
+        observed.baseRef = `refs/heads/${pr.base.ref}`;
+      }
+    }
     const event = {
       type: raw.action,
       repositoryId: expectedRun.repositoryId,
       pr: pr.number,
       readinessId: proof.value.readinessId,
-      head: pr.head?.sha,
+      ...observed,
     };
     return await admitCandidate(port, event);
   } catch {

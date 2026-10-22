@@ -4,6 +4,8 @@ import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import * as runtime from '../../tools/governance/controller-runtime.mjs';
 import { digest } from '../../tools/governance/journal.mjs';
+import { createGithubPort } from '../../tools/governance/github-port.mjs';
+import { LocalDurableStore } from '../../tools/governance/local-durable-store.mjs';
 import { fixture, c, signed, workerRun } from './composed-adapter-fixture.mjs';
 
 const inputs = () => ({
@@ -290,5 +292,133 @@ test('dispatch_selected_source_cannot_reach_checkout_or_import', async (t) => {
         assert.deepEqual(trace, []);
       });
     }
+  }
+});
+
+async function controllerObservation(f, action, pullRequest, readinessId = c.attempt) {
+  const body = JSON.stringify({ repository: { id: 1 }, action, pull_request: pullRequest });
+  return runtime.handleTrustedEvent(
+    {
+      body,
+      archive: signed({
+        purpose: 'controller-event',
+        run: f.portConfig.controllerRun,
+        readinessId,
+        bodyDigest: digest(body),
+      }),
+    },
+    {
+      port: f.port,
+      expectedRun: f.portConfig.controllerRun,
+      publicKey: f.portConfig.publicKey,
+      mode: 'offline-test',
+    },
+  );
+}
+const observedCandidate = () => ({
+  number: c.pr,
+  head: { sha: c.head },
+  base: { sha: c.base, ref: 'develop' },
+});
+
+test('final_fix_authenticated_candidate_drift_survives_restore_and_restart', async (t) => {
+  for (const action of ['edited', 'synchronize'])
+    for (const field of ['base', 'head', 'baseRef'])
+      await t.test(`${action} ${field}`, async (t) => {
+        const f = await setup(t);
+        const admitted = await f.runtime.command({ inputs: inputs() });
+        assert.equal(admitted.kind, 'verified');
+        const observed = observedCandidate();
+        if (field === 'baseRef') observed.base.ref = 'other';
+        else observed[field].sha = 'd'.repeat(40);
+        // Signed bytes observed drift; current native reads already show the original pair.
+        assert.equal((await controllerObservation(f, action, observed)).kind, 'blocked');
+        const store = new LocalDurableStore(f.dir);
+        store.authorizeReadinessRequest = f.store.authorizeReadinessRequest;
+        const portConfig = { ...f.portConfig, store };
+        const restartedPort = createGithubPort(portConfig);
+        const journal = await restartedPort.readJournal(c);
+        assert.equal(journal.kind, 'verified');
+        assert.deepEqual(
+          journal.value.filter((row) => row.action === 'invalidate').map((row) => row.phase),
+          ['intent', 'result'],
+        );
+        for (const row of journal.value) assert.deepEqual(row.candidate, c);
+        assert.equal(f.pr.base.sha, c.base);
+        assert.equal(f.pr.head.sha, c.head);
+        assert.equal(f.pr.base.ref, 'develop');
+        assert.equal(f.pr.draft, false);
+        const restartedRuntime = compose({ ...f.trusted, portConfig });
+        assert.equal(
+          (await restartedRuntime.ciCallback(callback(admitted.value.claimId))).kind,
+          'blocked',
+        );
+        assert.equal(
+          (await portConfig.store.readCiClaim(admitted.value.claimId)).value.start,
+          null,
+        );
+        assert.equal(sends(f), 1);
+        assert.equal(
+          f.calls.filter((call) => call.body?.includes('convertPullRequestToDraft')).length,
+          0,
+        );
+      });
+});
+
+test('final_fix_unchanged_and_other_attempt_observations_preserve_current_start', async (t) => {
+  for (const action of ['edited', 'synchronize'])
+    for (const control of ['unchanged', 'old-base', 'old-head', 'old-baseRef'])
+      await t.test(`${action} ${control}`, async (t) => {
+        const f = await setup(t);
+        const admitted = await f.runtime.command({ inputs: inputs() });
+        assert.equal(admitted.kind, 'verified');
+        const observed = observedCandidate();
+        if (control === 'old-baseRef') observed.base.ref = 'other';
+        else if (control !== 'unchanged') observed[control.slice(4)].sha = 'd'.repeat(40);
+        assert.equal(
+          (
+            await controllerObservation(
+              f,
+              action,
+              observed,
+              control === 'unchanged' ? c.attempt : 'previous-attempt',
+            )
+          ).kind,
+          'blocked',
+        );
+        const journal = await f.port.readJournal(c);
+        assert.equal(journal.kind, 'verified');
+        assert.equal(journal.value.filter((row) => row.action === 'invalidate').length, 0);
+        assert.equal(f.pr.draft, false);
+        assert.equal(
+          (await f.runtime.ciCallback(callback(admitted.value.claimId))).value.execute,
+          true,
+        );
+        assert.equal(sends(f), 1);
+      });
+});
+
+test('final_fix_malformed_authenticated_candidate_observations_deny_without_invalidation', async (t) => {
+  for (const patch of [
+    { base: { sha: 'invalid', ref: 'other' } },
+    { base: { sha: 'd'.repeat(40), ref: '../other' } },
+    { head: { sha: null }, base: { sha: 'd'.repeat(40), ref: 'develop' } },
+    { base: { sha: null, ref: 'develop' } },
+  ]) {
+    const f = await setup(t);
+    const admitted = await f.runtime.command({ inputs: inputs() });
+    assert.equal(admitted.kind, 'verified');
+    const result = await controllerObservation(f, 'edited', { ...observedCandidate(), ...patch });
+    assert.equal(result.kind, 'blocked');
+    assert.match(result.reason, /candidate observation/i);
+    assert.equal(
+      (await f.port.readJournal(c)).value.filter((row) => row.action === 'invalidate').length,
+      0,
+    );
+    assert.equal(
+      (await f.runtime.ciCallback(callback(admitted.value.claimId))).value.execute,
+      true,
+    );
+    assert.equal(f.pr.draft, false);
   }
 });

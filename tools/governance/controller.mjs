@@ -1,5 +1,5 @@
 import { sameExecution } from './worker-results.mjs';
-import { blocked, verified, exactFields, sha40 } from './contracts.mjs';
+import { blocked, verified, exactFields, sha40, validBaseRef } from './contracts.mjs';
 import { sameCandidate, validCandidate, operationKey } from './journal.mjs';
 export function candidateOf(o) {
   const origin = o.admission?.candidate;
@@ -85,23 +85,24 @@ export function decideReadiness(o, event, journal) {
       : decision('invalidate');
   if (o.state !== 'open' || o.draft || o.readiness.kind !== 'ready_for_review')
     return none('Current native Ready required');
+  // A supplied authenticated candidate observation for this same native attempt
+  // survives restored current reads. Persist against the original request identity;
+  // the intervening snapshot never authorizes Draft against the restored target.
+  if (
+    c.protocolVersion === 2 &&
+    verifiedReadyOrigin(o, c) &&
+    !evidenceInvalidated &&
+    ((sha40(event.head) && event.head !== c.head) ||
+      (sha40(event.base) && event.base !== c.base) ||
+      (validBaseRef(event.baseRef) && event.baseRef !== c.baseRef))
+  )
+    return decision('invalidate');
   if (event.type === 'synchronize') {
-    if (event.head !== c.head) {
-      // The earlier attempt check rejects unrelated deliveries. A signed head
-      // change for this same attempt remains invalidating evidence after restore;
-      // its stale target can never authorize Draft against the current snapshot.
-      if (
-        c.protocolVersion === 2 &&
-        verifiedReadyOrigin(o, c) &&
-        sha40(event.head) &&
-        !evidenceInvalidated
-      )
-        return decision('invalidate');
-      return none('Superseded synchronization');
-    }
+    if (event.head !== c.head) return none('Superseded synchronization');
     if (!verifiedReadyOrigin(o, c)) return none('Authenticated readiness origin required');
     if (originOf(o).head !== c.head) return decision('draft');
-    if (originOf(o).base !== c.base && !evidenceInvalidated) return decision('invalidate');
+    if ((originOf(o).base !== c.base || originOf(o).baseRef !== c.baseRef) && !evidenceInvalidated)
+      return decision('invalidate');
     return none('Synchronize never admits CI');
   }
   if (evidenceInvalidated) return none('Attempt evidence invalidated; new Ready required');
