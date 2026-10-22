@@ -2,56 +2,83 @@ name: Candidate CI
 on:
   workflow_dispatch:
     inputs:
-      base:
-        description: Exact admitted base SHA; shipping hotfix uses released same-line baseline
+      claim_id:
+        description: Durable continuation slot; never execution permission
         required: true
         type: string
-      head:
-        description: Exact admitted head SHA; never a synthetic develop merge ref
+      request_id:
+        description: Assertion of the original admitted request
+        required: true
+        type: string
+      candidate:
+        description: Full v2 candidate JSON assertion; durable claim is authority
+        required: true
+        type: string
+      definition_sha:
+        description: Assertion of separately pinned trusted workflow revision
         required: true
         type: string
 permissions:
   contents: read
 jobs:
   validate:
-    # Dispatch is NOT admission. Live authenticated Task 6 adapters do not exist.
+    # Dispatch is NOT admission. Live authenticated providers remain unselected.
     if: ${{ false }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
     steps:
-      - name: Block until trusted workflow revision and current admission are verified
+      - name: Block until production capabilities and current admission are verified
         run: |
-          echo 'Inactive: dispatcher, native history, durable lock and run/body issuer unimplemented.'
+          echo 'Inactive: production archive issuer, shared backend and workflow identity unresolved.'
           exit 1
-      # The following is an unreachable check recipe, not an activated worker.
-      # Live implementation must recheck admission before checkout and completion.
+      - name: Deny until independent trusted-source bootstrap exists
+        id: start
+        env:
+          CI_INPUTS: ${{ toJSON(inputs) }}
+        run: |
+          echo 'Inactive: independently approved runtime source capability unavailable.'
+          exit 1
+      # No runtime checkout/import or execute output exists in this recipe.
+      # A future independently trusted external bootstrap/protected configuration
+      # must authenticate immutable default-branch source BEFORE any code load,
+      # then invoke createReadinessRuntime(...).ciCallback for start/completion.
+      # github.workflow_sha/ref and dispatch inputs are assertions, not authority.
+      # Only that host's NEW authenticated start may publish execute/base/head.
+      # Only a NEW start consumption can reach candidate code; reruns deny.
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        if: ${{ steps.start.outputs.execute == 'true' }}
         with:
-          ref: ${{ inputs.base }}
+          ref: ${{ steps.start.outputs.base }}
           path: candidate-base
           persist-credentials: false
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        if: ${{ steps.start.outputs.execute == 'true' }}
         with:
-          ref: ${{ inputs.head }}
+          ref: ${{ steps.start.outputs.head }}
           path: candidate-head
           persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        if: ${{ steps.start.outputs.execute == 'true' }}
         with:
           node-version: 24.19.0
           package-manager-cache: false
       - name: Actual configured local checks on candidate head
+        id: checks
+        if: ${{ steps.start.outputs.execute == 'true' }}
         working-directory: candidate-head
         run: |
           npm ci --ignore-scripts
           npm run check:local > ../candidate-checks.log 2>&1
-      # Product checks and code scanning must be added when real scripts and a
-      # separately verified scanner exist. Their absence is NOT a passing check.
+      # Consequential completion remains a nonexecutable recipe: the independently
+      # trusted host must call the same ciCallback with the original claim/result
+      # archive. Importing code selected by this dispatch cannot bootstrap trust.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: ${{ always() }}
+        if: ${{ always() && steps.start.outputs.execute == 'true' }}
         with:
           name: candidate-ci-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
           path: candidate-checks.log
           retention-days: 14
           if-no-files-found: error
-      # No result attestation or governance check is emitted by this template.
+      # No live result attestation or governance success is emitted. Product checks,
+      # code scanning, runner isolation and hosted acceptance remain Task 7 gates.

@@ -13,6 +13,7 @@
 - [Markdown table of contents](#markdown-table-of-contents)
 - [PDF of approved documents](#pdf-of-approved-documents)
 - [Approval and execution state](#approval-and-execution-state)
+- [Verified admission amendment](#verified-admission-amendment)
 - [Persistence boundary](#persistence-boundary)
 
 ## Workflow and model policy
@@ -144,6 +145,14 @@ Render a PDF from the final approved Markdown revision of each project document.
 ## Approval and execution state
 
 The user approved the specification, architecture, and written implementation plan. Subagent-driven execution is selected. The remote repository checkpoint has been signaled and the repository/Project automation design was approved with amendments on 2026-10-20; prepare and review its implementation plan, then execute authorized setup with the specified activation gates. Do not create remote resources or product scaffolding during documentation updates.
+
+## Verified admission amendment
+
+Owner-approved 2026-10-22: the [verified admission design](superpowers/specs/2026-10-22-verified-admission-design.md) and [implementation plan](superpowers/plans/2026-10-22-verified-admission.md) supersede the earlier Ready event-time SHA proof requirement for new protocol-v2 admission. Bind the exact expected base ref/base/head from the authenticated deliberate request at verified admission, using the registered controller's complete observed Draft→Ready window, retained proof and current native Ready witness. Every worker start and consequential completion revalidates that same full candidate, durable operation, latest native history and journal. Legacy records remain historical reconciliation data; no native button click or shared bot actor name admits CI.
+
+The proof is limited to the pair selected by the authorized request and verified while observing native Ready. Before/after reads are not atomic or linearizable. Unobserved `B/H → B2/H2 → B/H` may evade them. Do not claim event-time SHAs, uninterrupted equality, unique mutation causality or readiness compare-and-swap. Detected ambiguity/change and unknown outcomes deny admission and retain reconciliation obligations. Recovery requires authenticated resolution and a deliberate human return to Draft before a new request; never automatically restore Ready.
+
+Offline task reviews and signed Draft delivery are authorized development evidence, separate from the future hosted CI→fresh-review lifecycle. Actions remain disabled, executable workflow gates false, production capability preflight failing, setup closed and integration false. The original Task 7 runner, proxy, spending and hosted acceptance obligations remain open; no backend, identity/key, grant, credential or positive review limit is selected by this amendment.
 
 ## Persistence boundary
 

@@ -56,8 +56,19 @@ const snapshot = () => ({
 export async function fixture(
   t,
   {
-    events = timeline,
-    pr = snapshot(),
+    freshReadiness = false,
+    seedAdmission = !freshReadiness,
+    events = freshReadiness
+      ? [
+          {
+            id: 9,
+            actor: { id: 9 },
+            event: 'converted_to_draft',
+            created_at: '2026-01-01T00:00:00Z',
+          },
+        ]
+      : timeline,
+    pr = { ...snapshot(), draft: freshReadiness },
     proof = true,
     modify = () => {},
     concreteContinuation = false,
@@ -94,28 +105,30 @@ export async function fixture(
     event: 'workflow_dispatch',
     executionSha: run.sha,
   };
-  store.authorizeReadinessRequest = async (q) =>
-    authenticateReadinessRequest(JSON.stringify(q), {
-      runId: '12',
-      runAttempt: 1,
-      authorizedActorIds: ['9'],
-      approvedDefinition: Object.freeze({
-        repositoryId: '1',
-        workflowId: run.workflowId,
-        sha: run.sha,
-        ref: run.ref,
+  const requestContext = {
+    runId: '12',
+    runAttempt: 1,
+    authorizedActorIds: ['9'],
+    approvedDefinition: Object.freeze({
+      repositoryId: '1',
+      workflowId: run.workflowId,
+      sha: run.sha,
+      ref: run.ref,
+    }),
+    lookupRun: async () => verified(dispatchRun),
+    resolvePr: async () => verified({ repositoryId: '1', pr: 2, prNodeId: 'PR_2' }),
+    verifyRequestEvidence: async (body) =>
+      verified({
+        bodyDigest: digest(body),
+        originalRunId: '12',
+        runAttempt: 1,
+        definitionSha: run.sha,
+        triggeringActorId: '9',
       }),
-      lookupRun: async () => verified(dispatchRun),
-      resolvePr: async () => verified({ repositoryId: '1', pr: 2, prNodeId: 'PR_2' }),
-      verifyRequestEvidence: async (body) =>
-        verified({
-          bodyDigest: digest(body),
-          originalRunId: '12',
-          runAttempt: 1,
-          definitionSha: run.sha,
-          triggeringActorId: '9',
-        }),
-    });
+  };
+  const retainedRequestContext = { ...requestContext };
+  store.authorizeReadinessRequest = async (q) =>
+    authenticateReadinessRequest(JSON.stringify(q), retainedRequestContext);
   const originalAfter = {
     repositoryId: '1',
     pr: 2,
@@ -145,7 +158,7 @@ export async function fixture(
   };
   const proofBody = JSON.stringify(retainedProof),
     proofDigest = digest(proofBody);
-  if ((await store.readOperation(c.requestId)).value === null)
+  if (seedAdmission && (await store.readOperation(c.requestId)).value === null)
     await store.withPrLock('1:2', async () => {
       let o = {
         version: 2,
@@ -200,6 +213,10 @@ export async function fixture(
       }),
     ]),
   );
+  const phases = new Map(),
+    proofs = new Map(),
+    admittedWindows = new Map(),
+    dispatches = [];
   const archive = async (purpose, input) => {
     if (!proof) return null;
     if (purpose === 'ci-dispatch-discovery' && concreteContinuation) {
@@ -209,7 +226,7 @@ export async function fixture(
         dispatchDigest: input.bodyDigest,
         claimId: input.claim.id,
         requestId: c.requestId,
-        candidate: c,
+        candidate: freshReadiness ? JSON.parse(dispatches[0].inputs.candidate) : c,
         definitionSha: workerRun.sha,
         runs: discovery === 'ambiguous' ? [workerRun, { ...workerRun, id: '99' }] : [workerRun],
       };
@@ -230,6 +247,35 @@ export async function fixture(
         envelope: signed({ purpose, run, bodyDigest: digest(body), candidate: data.candidate }),
       };
     }
+    if (freshReadiness && purpose === 'readiness-phase') {
+      const envelope = signed({ purpose, run, ...input.bindings });
+      phases.set(input.body, envelope);
+      if (input.evidence?.proof)
+        admittedWindows.set(
+          digest(JSON.stringify(input.evidence.proof)),
+          structuredClone(input.evidence.after),
+        );
+      return envelope;
+    }
+    if (freshReadiness && purpose === 'readiness-phase-read')
+      return { body: input.body, envelope: phases.get(input.body) };
+    if (freshReadiness && purpose === 'readiness-proof-write') {
+      proofs.set(
+        input.body,
+        signed({ purpose: 'readiness-proof', run, bodyDigest: digest(input.body) }),
+      );
+      return proofs.get(input.body);
+    }
+    if (freshReadiness && purpose === 'readiness-proof-read')
+      return { body: input.body, envelope: proofs.get(input.body) };
+    if (freshReadiness && purpose === 'readiness-admission') {
+      const entry = [...proofs].find(([body]) => digest(body) === input.proofDigest);
+      return entry
+        ? { body: entry[0], envelope: entry[1], after: admittedWindows.get(input.proofDigest) }
+        : null;
+    }
+    if (freshReadiness && purpose === 'readiness-window')
+      return signed({ purpose, run, ...input.bindings });
     if (purpose === 'readiness-admission')
       return {
         body: proofBody,
@@ -264,6 +310,7 @@ export async function fixture(
       const persisted = await store.readCiClaim(JSON.parse(req.body).inputs.claim_id);
       assert.equal(persisted.kind, 'verified');
       assert.equal(persisted.value.status, 'pending');
+      dispatches.push(JSON.parse(req.body));
       await boundary?.('after-send', { store, dir, calls });
       if (loseResponse) throw Error('response lost after accepted send');
       return { status: 204, headers: {}, body: '' };
@@ -298,6 +345,32 @@ export async function fixture(
         event: r.event,
         head_sha: r.executionSha,
       };
+    } else if (
+      req.path === '/graphql' &&
+      JSON.parse(req.body).query.includes('markPullRequestReadyForReview')
+    ) {
+      const op = (await store.readOperation(c.requestId)).value;
+      assert.equal(op.state, 'mutation-pending');
+      assert.match(op.beforeDigest, /^[a-f0-9]{64}$/);
+      assert.deepEqual(JSON.parse(req.body).variables, {
+        id: 'PR_2',
+        clientMutationId: c.requestId,
+      });
+      pr.draft = false;
+      events.push({
+        id: 10,
+        actor: { id: 5 },
+        event: 'ready_for_review',
+        created_at: '2026-01-01T00:00:00Z',
+      });
+      body = {
+        data: {
+          markPullRequestReadyForReview: {
+            clientMutationId: c.requestId,
+            pullRequest: { id: 'PR_2', isDraft: false },
+          },
+        },
+      };
     } else if (req.path === '/graphql') {
       pr.draft = true;
       body = {
@@ -312,7 +385,7 @@ export async function fixture(
     modify(req, response);
     return response;
   };
-  const port = createGithubPort({
+  const portConfig = {
     http,
     archive,
     publicKey,
@@ -321,7 +394,7 @@ export async function fixture(
     repositoryId: '1',
     ledgerNumber: 7,
     ledgerId: '7',
-    controllerRun: run,
+    controllerRun: { ...run },
     ciContinuation: concreteContinuation
       ? { approvedDefinition: workerRun }
       : {
@@ -341,22 +414,27 @@ export async function fixture(
         },
     workers: { ci: workerRun },
     workerResults: async () => {
-      const body = encodeWorkerResult({ ...workerResult, claimId: claim.id });
+      const candidate = freshReadiness ? JSON.parse(dispatches[0].inputs.candidate) : c;
+      const body = encodeWorkerResult({ ...workerResult, candidate, claimId: claim.id });
       return {
         body,
         envelope: signed({
           purpose: 'worker-result',
           run: workerRun,
-          candidate: c,
+          candidate,
           worker: 'ci',
           bodyDigest: digest(body),
         }),
       };
     },
-  });
+  };
+  const port = createGithubPort(portConfig);
   port.fixtureProofDigest = proofDigest;
   return {
     port,
+    portConfig,
+    requestContext,
+    request,
     store,
     calls,
     comments,
