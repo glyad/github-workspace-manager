@@ -1,0 +1,3 @@
+#!/bin/sh
+set -eu
+exec node tools/governance/local-guard.mjs pre-commit
