@@ -6,7 +6,8 @@ import {
   readWorkerResult,
   resultDecision,
 } from './worker-transport.mjs';
-import { verified } from './contracts.mjs';
+import { verified, blocked, validReadinessRequest } from './contracts.mjs';
+import { readinessWindowDigest, readinessWindowBindings } from './readiness-handshake.mjs';
 import { candidateOf } from './controller.mjs';
 const keyOf = (c) => `${c.repositoryId}:${c.pr}`;
 const numeric = (n) => Number.isSafeInteger(n) && n > 0;
@@ -40,6 +41,8 @@ export function createGithubPort({
   const root = `/repos/${repository}`;
   const active = new Set();
   const prNodes = new Map();
+  const readinessActive = new Set(),
+    readinessSent = new Set();
   async function request(method, path, body, status = 200) {
     const response = await http({
       method,
@@ -129,7 +132,215 @@ export function createGithubPort({
     if (active.has(key)) await persist();
     else await store.withPrLock(key, persist);
   }
+  // The trusted operation facade shares the existing PR lock; it never takes
+  // the old admission wrapper recursively. B authenticates real Task A receipts.
+  const readinessStore = {};
+  for (const method of [
+    'authorizeReadinessRequest',
+    'readOperation',
+    'appendOperation',
+    'readObligations',
+    'registerOperationOwner',
+    'finishOperationOwner',
+    'withOperationReconciliationLock',
+  ])
+    if (typeof store[method] === 'function') readinessStore[method] = store[method].bind(store);
+  readinessStore.withPrLock = (key, fn) =>
+    store.withPrLock(key, async () => {
+      readinessActive.add(key);
+      readinessSent.delete(key);
+      try {
+        return await fn();
+      } finally {
+        readinessActive.delete(key);
+        readinessSent.delete(key);
+      }
+    });
+  readinessStore.authenticateOperationEvidence = async (evidence, operation, phase) => {
+    try {
+      const beforeDigest = evidence.before?.evidenceDigest;
+      const body = JSON.stringify(evidence);
+      boundedJson(body, 4_500_000);
+      const bindings = {
+        retained: true,
+        requestId: operation.request.requestId,
+        operationDigest: digest(JSON.stringify(operation)),
+        phase,
+        evidenceDigest: digest(body),
+        beforeDigest,
+      };
+      if (phase !== 'mutation-pending')
+        bindings.mutationDigest = digest(JSON.stringify(evidence.mutation));
+      if (phase === 'accepted') bindings.proofDigest = digest(JSON.stringify(evidence.proof));
+      const authenticated = await proof(
+        'readiness-phase',
+        { operation, evidence, body, bindings },
+        { run: controllerRun, ...bindings },
+      );
+      const retrieved = await archive('readiness-phase-read', { body, bindings });
+      if (retrieved?.body !== body) return blocked('Full phase evidence readback unavailable');
+      const read = verifyArchive(
+        retrieved.envelope,
+        { purpose: 'readiness-phase', run: controllerRun, ...bindings },
+        publicKey,
+      );
+      return read.kind === 'verified' ? verified(authenticated) : read;
+    } catch {
+      return blocked('Operation evidence authentication unavailable');
+    }
+  };
   const port = {
+    readinessStore,
+    async observeReadinessWindow(input) {
+      try {
+        if (!validReadinessRequest(input) || input.repositoryId !== repositoryId)
+          return blocked('Unrelated readiness observation');
+        const read = async () => {
+          const { value: p } = await request('GET', `${root}/pulls/${input.pr}`);
+          const events = await pages(`${root}/issues/${input.pr}/timeline`);
+          return { p, events };
+        };
+        const first = await read(),
+          second = await read();
+        if (JSON.stringify(first) !== JSON.stringify(second))
+          throw Error('Unstable native pages/snapshot');
+        const { p, events } = second;
+        if (
+          p.number !== input.pr ||
+          p.node_id !== input.prNodeId ||
+          id(p.base?.repo?.id) !== repositoryId ||
+          id(p.head?.repo?.id) !== repositoryId ||
+          !['open', 'closed'].includes(p.state) ||
+          typeof p.draft !== 'boolean' ||
+          !/^[a-f0-9]{40}$/.test(p.base?.sha) ||
+          !/^[a-f0-9]{40}$/.test(p.head?.sha) ||
+          typeof p.base?.ref !== 'string'
+        )
+          throw Error('Native readiness schema/identity');
+        // Preserve API native sequence; timestamps are neither order nor causality.
+        const ordered = events.map((e) => {
+          if (
+            !numeric(e.id) ||
+            typeof e.event !== 'string' ||
+            e.event.length > 128 ||
+            !id(e.actor?.id)
+          )
+            throw Error('Native timeline schema');
+          return { id: String(e.id), kind: e.event, actorId: id(e.actor.id) };
+        });
+        if (new Set(ordered.map((e) => e.id)).size !== ordered.length)
+          throw Error('Duplicate timeline boundary');
+        const window = {
+          repositoryId,
+          pr: input.pr,
+          prNodeId: p.node_id,
+          state: p.state,
+          draft: p.draft,
+          baseRef: `refs/heads/${p.base.ref}`,
+          base: p.base.sha,
+          head: p.head.sha,
+          events: ordered,
+          complete: true,
+          order: 'native',
+          nativeDigest: digest(JSON.stringify(second)),
+        };
+        window.evidenceDigest = readinessWindowDigest(window);
+        const bindings = {
+          requestDigest: digest(JSON.stringify(input)),
+          evidenceDigest: window.evidenceDigest,
+          nativeDigest: window.nativeDigest,
+          historyStart: 'creation',
+          complete: true,
+          order: 'native',
+        };
+        await proof(
+          'readiness-observation',
+          { request: input, native: second, window, bindings },
+          { run: controllerRun, ...bindings },
+        );
+        return verified(window);
+      } catch {
+        return blocked('Complete ordered readiness observation unavailable');
+      }
+    },
+    async markReady(input) {
+      const key = keyOf(input);
+      if (
+        !validReadinessRequest(input) ||
+        input.repositoryId !== repositoryId ||
+        !readinessActive.has(key) ||
+        readinessSent.has(key)
+      )
+        return blocked('Ready requires scoped unused PR ownership');
+      readinessSent.add(key);
+      try {
+        const { value } = await request('POST', '/graphql', {
+          query:
+            'mutation($id:ID!,$clientMutationId:String!){markPullRequestReadyForReview(input:{pullRequestId:$id,clientMutationId:$clientMutationId}){clientMutationId pullRequest{id isDraft}}}',
+          variables: { id: input.prNodeId, clientMutationId: input.requestId },
+        });
+        const result = value.data?.markPullRequestReadyForReview;
+        if (
+          value.errors ||
+          result?.pullRequest?.id !== input.prNodeId ||
+          result.pullRequest.isDraft !== false ||
+          result.clientMutationId !== input.requestId
+        )
+          throw Error('Unsettled Ready response');
+        // Echoed clientMutationId binds the response only; it is not idempotency
+        // or the native Ready witness. The handshake independently verifies it.
+        return verified({
+          requestId: input.requestId,
+          prNodeId: input.prNodeId,
+          clientMutationId: input.requestId,
+          ready: true,
+          responseDigest: digest(JSON.stringify(value)),
+        });
+      } catch {
+        return { kind: 'uncertain', reason: 'Ready response unavailable', evidence: [] };
+      }
+    },
+    async authenticateReadinessWindow(input, before, mutation, after) {
+      const requestAuthentication = await store.authorizeReadinessRequest(input);
+      await lookupRun(controllerRun);
+      const bindings = readinessWindowBindings(input, before, mutation, after, controllerRun);
+      const envelope = await archive('readiness-window', {
+        request: input,
+        before,
+        mutation,
+        after,
+        bindings,
+      });
+      return { requestAuthentication, controllerRun, publicKey, envelope };
+    },
+    async publishReadinessProof(value) {
+      try {
+        const body = JSON.stringify(value);
+        boundedJson(body, 16384);
+        const expected = {
+          purpose: 'readiness-proof',
+          run: controllerRun,
+          bodyDigest: digest(body),
+        };
+        const written = verifyArchive(
+          await archive('readiness-proof-write', { body }),
+          expected,
+          publicKey,
+        );
+        const retrieved = await archive('readiness-proof-read', { body });
+        if (retrieved?.body !== body) throw Error('Exact proof bytes missing from readback');
+        const read = verifyArchive(retrieved.envelope, expected, publicKey);
+        if (written.kind !== 'verified' || read.kind !== 'verified')
+          throw Error('Exact authenticated proof readback unavailable');
+        return verified(value);
+      } catch {
+        return {
+          kind: 'uncertain',
+          reason: 'Proof publication requires reconciliation',
+          evidence: [],
+        };
+      }
+    },
     async withPrLock(key, fn) {
       return store.withPrLock(key, async () => {
         if ((await store.pending(key)).length)
