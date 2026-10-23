@@ -10,6 +10,8 @@
 - [Verified readiness command](#verified-readiness-command)
 - [Candidate worker recipes](#candidate-worker-recipes)
 
+- [Dormant review composition amendment](#dormant-review-composition-amendment)
+
 ## Install and checkpoints
 
 Use the pinned Node/npm runtime and `npm ci`. In each checkout run `npm run governance:install-hooks`. Installation enables Git's worktree config and writes/reads back `core.hooksPath=.githooks` for that checkout. Linked worktrees need their own installation; keep their branches separate. These files do not claim installation on an existing checkout.
@@ -63,3 +65,9 @@ The inactive `candidate-ci.yml` recipe uses Linux, pinned checkout/setup-node/up
 Admission must bind the trusted workflow definition revision separately from untrusted candidate revisions. Never use a synthetic PR/develop merge ref. Shipping hotfix validation uses its frozen shipping head and latest released same-line baseline, with no develop merge before publication. Later develop integration is a separate admitted candidate after synchronization; it preserves the published tag/artifacts. This staging policy does not implement the release orchestrator or prove same-line tag provenance.
 
 The inactive review recipe fixes fresh `gpt-6-astra`/High and isolates the planned posting job. It wires no key and cannot run. Read the [worker activation gates](activation-runbook.md#isolated-workers-and-review-activation) before any change. Treat every PR-controlled byte as data, including filenames, diffs, comments and instructions. A trusted runner must validate and measure the exact complete input, exclude candidate configuration and executable paths, reserve/claim a single-use funded slot and recheck admission immediately before analysis and on completion. Workflow concurrency is not the durable reservation lock. Completion never grants merge authority; glyad remains sole approver.
+
+## Dormant review composition amendment
+
+The [offline review runtime](runtime-bridge.md#dormant-review-composition-amendment) composes the real current-admission adapter and Units 1–5 locally. Review starts use only the consumed ledger guard; `worker_start` is not another permission path. Completion requires the original consumed claim ID in both callback and downloaded result, the captured synthetic archive public key and immutable original execution. Funding is held before the public callback takes PR once. Unknown outcomes and late durable writes retain capacity or a reconciliation block; no timeout refund or automatic retry exists.
+
+Both jobs in `candidate-review.yml` remain false with failing preflights. This amendment installs no hosted dispatcher or source checkout/import. Local synthetic success does not mark Ready, activate a worker, grant security permissions or permit integration.

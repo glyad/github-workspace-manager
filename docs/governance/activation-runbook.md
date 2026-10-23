@@ -10,6 +10,8 @@
 
 - [Isolated workers and review activation](#isolated-workers-and-review-activation)
 
+- [Dormant review composition amendment](#dormant-review-composition-amendment)
+
 ## Current boundary
 
 This source is inactive. No ledger Issue, credential, actor grant, workflow execution, paid call, remote mutation or hosted check is created by Task 6 staging. `inactivePort()` refuses execution without network access. Actions must remain disabled; the workflow also has an unconditional false job gate. Existing setup closure admits ordinary Draft work only; integration is false. Do not reopen setup or reinterpret historical activation snapshots as current live evidence.
@@ -62,3 +64,9 @@ The dormant Codex Action revision is `bdf19a4a223ec2549a3e2274a0cf61556bc07675` 
 Demonstrate malicious PR instructions cannot access the real key, privileged posting credentials, trusted home/config, hooks/skills/MCPs or writable runner control files. Never run candidate code in the key-bearing analysis path; provide bounded PR data via a trusted extraction step and independent runner, keep privileged posting separate, and verify the selected proxy/sandbox behavior on disposable Linux resources. Public forks remain blocked until that succeeds; current policy blocks all forks. No such demonstration was performed locally.
 
 Only after separate consent and all evidence passes, run one real admitted candidate, verify `governance/ci`, `governance/review`, `governance/admission` on its exact base/head/attempt from the expected issuer, then enforce them on develop. A local agent review is not the selected hosted review. Durable release evidence must be retained separately from 14-day diagnostics. No hosted checks, enforcement, release or merge are delivered here.
+
+## Dormant review composition amendment
+
+The [Unit 6 executable offline path](runtime-bridge.md#dormant-review-composition-amendment) now binds a consumed original review claim through callback and exact downloaded result verification, with one shared run deadline and funding-before-PR ordering. Its positive limits, funding/isolation facts, fake proxy key, archive issuer and outcome resolver are trusted local fixtures only. No production limit, key, issuer, backend or spending approval is selected.
+
+Both review workflow jobs remain false and their preflights fail. Hosted source bootstrap must independently authenticate immutable trusted runtime source and the executing definition before any import; environment/ref assertions alone cannot establish that trust. No hosted dispatcher is installed. Existing paid execution, sandbox/credential-boundary proof, provider resource enforcement, real admitted-candidate acceptance, expected check issuer and integration gates remain required and false.

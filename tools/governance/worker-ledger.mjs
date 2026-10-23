@@ -1,4 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { types } from 'node:util';
+import { v2CandidateFields } from './contracts.mjs';
 import { LocalDurableStore } from './local-durable-store.mjs';
 import { blocked, verified, exactFields, requestId, boundedId } from './contracts.mjs';
 import { digest, sameCandidate, validCandidate, operationKey } from './journal.mjs';
@@ -366,7 +368,8 @@ export function createLocalReviewLedger(config) {
     }
     return { events, latest };
   }
-  async function appendReviewEvent(input) {
+  async function appendReviewEvent(input, deadline) {
+    requireLiveDeadline(deadline);
     const event = snapshot(input);
     owner();
     const before = await history();
@@ -380,6 +383,7 @@ export function createLocalReviewLedger(config) {
         (before.events.length ? digest(JSON.stringify(before.events.at(-1))) : '')
     )
       throw Error('Event sequence');
+    requireLiveDeadline(deadline);
     await storageAppend(scope, lDigest, event);
     owner();
     const after = await history();
@@ -469,7 +473,7 @@ export function createLocalReviewLedger(config) {
       );
     });
   };
-  function forOrigin(receipt) {
+  function forOrigin(receipt, deadline) {
     const row = authorityReceipts.get(authority)(receipt);
     const binding =
       row &&
@@ -543,7 +547,7 @@ export function createLocalReviewLedger(config) {
             claim: null,
             outcome: null,
           };
-          return appendReviewEvent(event);
+          return appendReviewEvent(event, deadline);
         });
       },
     });
@@ -567,6 +571,7 @@ export function createLocalReviewLedger(config) {
     origin,
     limits,
     owner,
+    authority,
   });
   return ledger;
 }
@@ -598,8 +603,15 @@ function nextEvent(history, previous, kind, claim, outcome) {
     outcome,
   };
 }
+// A runtime deadline only restricts continuation; it never grants execution authority.
+function requireLiveDeadline(deadline) {
+  if (deadline === undefined) return;
+  const remaining = deadline.remainingMs();
+  if (deadline.signal.aborted || !Number.isFinite(remaining) || remaining <= 0)
+    throw Error('Original review deadline expired');
+}
 /** Claim binds only the original provisioned origin. Repeated claims grant nothing. */
-export async function claimReservation(key, options, ledger) {
+export async function claimReservation(key, options, ledger, deadline) {
   if (
     !hash(key) ||
     !exactFields(options, ['originReceipt', 'materialDigest', 'invocationDigest']) ||
@@ -613,6 +625,7 @@ export async function claimReservation(key, options, ledger) {
   return lifecycle(ledger, async (i) => {
     const history = await i.history();
     i.owner();
+    requireLiveDeadline(deadline);
     const previous = history.latest.get(key);
     if (previous?.kind !== 'reserved') return blocked('Unclaimed reserved slot required');
     const r = snapshot(previous.reservation);
@@ -626,6 +639,7 @@ export async function claimReservation(key, options, ledger) {
     if (admitReview(r.candidate, await ledger.observe(r.candidate), i.limits).kind !== 'verified')
       return blocked('Current review admission changed');
     i.owner();
+    requireLiveDeadline(deadline);
     const claim = snapshot({
       id: claimId(key),
       reservationKey: key,
@@ -637,17 +651,19 @@ export async function claimReservation(key, options, ledger) {
       invocationDigest,
       start: null,
     });
-    await i.appendReviewEvent(nextEvent(history, previous, 'claimed', claim, null));
+    await i.appendReviewEvent(nextEvent(history, previous, 'claimed', claim, null), deadline);
     i.owner();
     return verified(claim);
   });
 }
 /** Persist start under funding then PR; release all locks before executing once. */
-export async function withClaimedReview(id, ledger, execute) {
+export async function withClaimedReview(id, ledger, execute, deadline) {
   if (!hash(id) || typeof execute !== 'function') return blocked('Claim ID and executor required');
+  requireLiveDeadline(deadline);
   const started = await lifecycle(ledger, async (i) => {
     const read = await ledger.readByClaimId(id);
     i.owner();
+    requireLiveDeadline(deadline);
     if (
       read.kind !== 'verified' ||
       !read.value?.claim ||
@@ -657,18 +673,21 @@ export async function withClaimedReview(id, ledger, execute) {
       return blocked('Original unconsumed claim required');
     const history = await i.history();
     i.owner();
+    requireLiveDeadline(deadline);
     const previous = history.latest.get(read.value.reservation.key);
     if (previous?.kind !== 'claimed') return blocked('Original claimed phase required');
     const c = snapshot(read.value.claim);
     if (admitReview(c.candidate, await ledger.observe(c.candidate), i.limits).kind !== 'verified')
       return blocked('Current review admission changed');
     i.owner();
+    requireLiveDeadline(deadline);
     const claim = snapshot({ ...c, start: { state: 'consumed', claimId: c.id, run: c.run } });
-    await i.appendReviewEvent(nextEvent(history, previous, 'consumed', claim, null));
+    await i.appendReviewEvent(nextEvent(history, previous, 'consumed', claim, null), deadline);
     i.owner();
     return verified(claim);
   });
   if (started.kind !== 'verified') return started;
+  requireLiveDeadline(deadline);
   // A lost lock-release/readback response can never reach this point.
   const guard = Object.freeze(Object.create(null));
   const state = { claim: started.value, active: true, used: false };
@@ -813,4 +832,73 @@ export async function settleReservation(key, evidence, ledger) {
 }
 export async function reconcileReservation(key, evidence, ledger) {
   return settleReservation(key, evidence, ledger);
+}
+
+/** Read-only consumed origin lookup. Funding is held by the completing runtime;
+ * this resolver neither acquires locks nor grants execution/settlement permission. */
+export function createConsumedReviewResolver(config) {
+  config = consumedData(config, ['ledger', 'originAuthority']);
+  if (!exactFields(config, ['ledger', 'originAuthority']))
+    throw Error('Exact resolver configuration required');
+  const ledger = config.ledger,
+    internal = ledgerInternals.get(ledger);
+  if (!internal || internal.authority !== config.originAuthority)
+    throw Error('Original ledger authority required');
+  return Object.freeze({
+    async resolve(input) {
+      try {
+        internal.owner();
+        input = consumedData(input, ['claimId', 'candidate']);
+        input.candidate = consumedData(input.candidate, v2CandidateFields);
+        if (
+          !exactFields(input, ['claimId', 'candidate']) ||
+          !hash(input.claimId) ||
+          !v2(input.candidate)
+        )
+          return blocked('Exact claim binding required');
+        const id = input.claimId,
+          candidate = snapshot(input.candidate);
+        const read = await ledger.readByClaimId(id);
+        internal.owner();
+        const claim = read.value?.claim;
+        if (
+          read.kind !== 'verified' ||
+          !claim?.start ||
+          claim.start.state !== 'consumed' ||
+          claim.start.claimId !== id ||
+          !sameCandidate(candidate, claim.candidate) ||
+          !sameExecution(claim.run, claim.start.run)
+        )
+          return blocked('Consumed original claim required');
+        const origin = internal.origin(read.value.reservation);
+        internal.owner();
+        if (origin.kind !== 'verified' || !sameExecution(origin.value.run, claim.run))
+          return blocked('Original independent execution required');
+        return verified(snapshot({ claim, run: claim.run }));
+      } catch {
+        return blocked('Live original funding scope required');
+      }
+    },
+  });
+}
+
+function consumedData(value, fields) {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    types.isProxy(value) ||
+    ![Object.prototype, null].includes(Object.getPrototypeOf(value))
+  )
+    throw Error('Plain consumed binding required');
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== fields.length || keys.some((k) => !fields.includes(k)))
+    throw Error('Exact consumed binding required');
+  const result = {};
+  for (const key of fields) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !Object.hasOwn(descriptor, 'value'))
+      throw Error('Data consumed binding required');
+    result[key] = descriptor.value;
+  }
+  return result;
 }

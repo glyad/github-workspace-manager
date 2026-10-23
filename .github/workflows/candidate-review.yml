@@ -6,6 +6,9 @@ permissions:
 jobs:
   analyze:
     # API funding, explicit limits, model availability and trust proof UNSELECTED.
+    # Unit 6 composes synthetic local providers only. No hosted dispatcher or
+    # trusted immutable-source bootstrap is installed; ref/env assertions cannot
+    # authorize a runtime import. Keep both false gates and failing preflights.
     if: ${{ false }}
     runs-on: ubuntu-latest
     permissions:

@@ -275,6 +275,7 @@ async function fixture(t, options = {}) {
     controllerRun: controller,
     ciContinuation: options.ciContinuation,
     workers: options.workers,
+    reviewContinuation: options.reviewContinuation,
     workerResults: options.workerResults,
   });
   return {
@@ -535,9 +536,31 @@ async function callback(f, options, type = 'worker_completed', outcome = 'succes
     { port: f.port, expectedRun: options.workerRun, publicKey, mode: 'offline-test' },
   );
 }
+// Adapter-only mutation regressions use an explicit synthetic consumed resolver.
+// The real opaque funding/claim resolver is exercised in review-runtime.test.mjs.
+const REVIEW_CLAIM = 'review-claim-1';
+function consumedReviewContinuation(selectRun) {
+  return {
+    async resolveConsumed({ claimId, candidate: c }) {
+      if (claimId !== REVIEW_CLAIM || JSON.stringify(c) !== JSON.stringify(candidate))
+        return { kind: 'blocked' };
+      const run = { ...selectRun() };
+      return verified({
+        claim: {
+          id: REVIEW_CLAIM,
+          candidate,
+          run,
+          start: { state: 'consumed', claimId: REVIEW_CLAIM, run },
+        },
+        run,
+      });
+    },
+  };
+}
 test('ci_start_is_single_use_and_completion_unlocks_review_only_after_success', async (t) => {
   const options = ciOptions();
   options.workers = { review: workerRun };
+  options.reviewContinuation = consumedReviewContinuation(() => workerRun);
   const f = await fixture(t, options);
   assert.equal((await admit(f)).kind, 'verified');
   assert.equal(
@@ -560,7 +583,11 @@ test('ci_start_is_single_use_and_completion_unlocks_review_only_after_success', 
   f.port.verifyWorkerCallback = verify;
   assert.equal(
     (await admitCandidate(f.port, { ...start(candidate), worker: 'review', run: workerRun })).kind,
-    'verified',
+    'blocked',
+  );
+  assert.equal(
+    (await f.port.withPrLock('1:2', () => f.port.observeReviewAdmission(candidate))).admitted,
+    true,
   );
 });
 test('caller_ci_mapping_never_authorizes_v2_callbacks_without_continuation', async (t) => {
@@ -861,6 +888,7 @@ test('round1_review_mapping_change_after_callback_authentication_denies_every_ex
       const options = ciOptions(),
         mapped = { review: { ...workerRun } };
       options.workers = mapped;
+      options.reviewContinuation = consumedReviewContinuation(() => mapped.review);
       options.nativeRun = (path) =>
         path.includes(`/runs/${mapped.review.id}/`) ? mapped.review : null;
       const ciResult = options.workerResults;
@@ -875,6 +903,7 @@ test('round1_review_mapping_change_after_callback_authentication_denies_every_ex
         const result = {
             candidate,
             worker: 'review',
+            claimId: REVIEW_CLAIM,
             outcome: 'failure',
             model: 'gpt-6-astra',
             effort: 'high',
@@ -907,7 +936,13 @@ test('round1_review_mapping_change_after_callback_authentication_denies_every_ex
       assert.equal((await callback(f, options, 'worker_start')).kind, 'verified');
       assert.equal((await callback(f, options)).kind, 'verified');
       const prior = f.comments.map((row) => row.body);
-      const raw = { type: 'worker_completed', candidate, worker: 'review', outcome: 'failure' },
+      const raw = {
+          type: 'worker_completed',
+          candidate,
+          worker: 'review',
+          outcome: 'failure',
+          claimId: REVIEW_CLAIM,
+        },
         body = JSON.stringify(raw);
       const archive = signed({
         purpose: 'worker-callback',
@@ -943,6 +978,7 @@ test('round1_matching_review_completion_keeps_separate_mapping_and_result_policy
       const reviewRun = { ...workerRun, id: '67', workflowId: '9' },
         options = ciOptions();
       options.workers = { review: reviewRun };
+      options.reviewContinuation = consumedReviewContinuation(() => reviewRun);
       options.nativeRun = (path) => (path.includes('/runs/67/') ? reviewRun : null);
       const ciResult = options.workerResults;
       options.workerResults = async (run) => {
@@ -950,6 +986,7 @@ test('round1_matching_review_completion_keeps_separate_mapping_and_result_policy
         const result = {
             candidate,
             worker: 'review',
+            claimId: REVIEW_CLAIM,
             outcome,
             model: 'gpt-6-astra',
             effort: 'high',
@@ -976,6 +1013,7 @@ test('round1_matching_review_completion_keeps_separate_mapping_and_result_policy
           type: 'worker_completed',
           candidate,
           worker: 'review',
+          claimId: REVIEW_CLAIM,
           outcome,
         }),
         archive = signed({
@@ -1004,6 +1042,7 @@ test('round1_review_callback_retains_signed_execution_when_mapping_mutates_in_pl
     mapped = { review: { ...original } },
     options = ciOptions();
   options.workers = mapped;
+  options.reviewContinuation = consumedReviewContinuation(() => mapped.review);
   options.nativeRun = (path) => (path.includes('/runs/67/') ? mapped.review : null);
   let intercept = false,
     changed = false,
@@ -1022,6 +1061,7 @@ test('round1_review_callback_retains_signed_execution_when_mapping_mutates_in_pl
     const result = {
         candidate,
         worker: 'review',
+        claimId: REVIEW_CLAIM,
         outcome: 'failure',
         model: 'gpt-6-astra',
         effort: 'high',
@@ -1049,6 +1089,7 @@ test('round1_review_callback_retains_signed_execution_when_mapping_mutates_in_pl
       type: 'worker_completed',
       candidate,
       worker: 'review',
+      claimId: REVIEW_CLAIM,
       outcome: 'failure',
     }),
     archive = signed({
@@ -1081,6 +1122,7 @@ test('round2_authoritative_review_execution_survives_lookup_and_download_mutatio
         mapped = { review: { ...original } },
         options = ciOptions();
       options.workers = mapped;
+      options.reviewContinuation = consumedReviewContinuation(() => mapped.review);
       let armed = false,
         changed = false,
         downloads = 0,
@@ -1114,6 +1156,7 @@ test('round2_authoritative_review_execution_survives_lookup_and_download_mutatio
         const result = {
             candidate,
             worker: 'review',
+            claimId: REVIEW_CLAIM,
             outcome: 'failure',
             model: 'gpt-6-astra',
             effort: 'high',
@@ -1141,6 +1184,7 @@ test('round2_authoritative_review_execution_survives_lookup_and_download_mutatio
           type: 'worker_completed',
           candidate,
           worker: 'review',
+          claimId: REVIEW_CLAIM,
           outcome: 'failure',
         }),
         archive = signed({

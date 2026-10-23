@@ -1,3 +1,17 @@
+import { createPublicKey, KeyObject } from 'node:crypto';
+import { types } from 'node:util';
+import { isAbsolute } from 'node:path';
+import { validCandidate } from './journal.mjs';
+import { v2CandidateFields } from './contracts.mjs';
+import { reserveReviewBudget } from './review-budget.mjs';
+import { extractReviewMaterial, buildReviewInvocation } from './review-material.mjs';
+import { runBoundedReview } from './review-runner.mjs';
+import {
+  claimReservation,
+  withClaimedReview,
+  reconcileReservation,
+  createConsumedReviewResolver,
+} from './worker-ledger.mjs';
 import { dispatchAdmittedCi, reconcileCiDispatch } from './worker-dispatch.mjs';
 import { authenticateReadinessRequest, readinessRequestBinding } from './readiness-request.mjs';
 import { withReadinessOperation } from './readiness-operation.mjs';
@@ -97,6 +111,13 @@ export async function handleTrustedWorkerCallback(
     const raw = boundedJson(body, 262144);
     // Preserve the independently authenticated callback execution across awaits;
     // a mutable review mapping cannot rewrite the signed invocation in place.
+    if (
+      raw.worker === 'review' &&
+      (raw.candidate?.protocolVersion !== 2 ||
+        raw.type !== 'worker_completed' ||
+        !exactFields(raw, ['type', 'candidate', 'worker', 'outcome', 'claimId']))
+    )
+      return blocked('Review completion requires consumed v2 claim');
     const callbackRun = Object.freeze({ ...expectedRun });
     const proof = verifyArchive(
       archive,
@@ -357,5 +378,359 @@ export function createReadinessRuntime(config = {}) {
       }
     },
     reconcileCi: (claimId) => handleTrustedCiContinuation({ claimId }, context),
+  });
+}
+
+/** Exact dormant review composition. Only independently provisioned local
+ * providers and opaque ledger authority can authorize this synthetic call path. */
+export function createReviewRuntime(config = {}) {
+  const denied = async () => blocked('Production backend unselected');
+  const closed = Object.freeze({ run: denied, complete: denied, reconcile: denied });
+  // Inspect mode first: unselected production must not touch any provider/key.
+  if (!config || types.isProxy(config)) return closed;
+  if (
+    Object.getOwnPropertyDescriptor(config, 'mode')?.value !== 'offline-test' ||
+    Object.getOwnPropertyDescriptor(config, 'productionBackend')?.value !== null
+  )
+    return closed;
+  try {
+    const q = reviewRecord(config, [
+      'mode',
+      'productionBackend',
+      'port',
+      'ledger',
+      'originAuthority',
+      'materialTransport',
+      'runnerPort',
+      'proxyPort',
+      'localConfig',
+      'limits',
+      'callbackContext',
+    ]);
+    const limits = Object.freeze(reviewRecord(q.limits, reviewLimitFields));
+    if (reviewLimitFields.some((k) => !Number.isSafeInteger(limits[k]) || limits[k] <= 0))
+      throw Error('Positive fixture limits required');
+    const duration = limits.maxRunSeconds * 1000;
+    if (!Number.isSafeInteger(duration) || duration > 2147483647)
+      throw Error('Safe timer duration required');
+    const local = reviewRecord(q.localConfig, [
+      'executable',
+      'childScript',
+      'sourceDigest',
+      'trustedInstructions',
+      'env',
+    ]);
+    if (!local.env || typeof local.env !== 'object' || types.isProxy(local.env))
+      throw Error('Plain environment required');
+    const envKeys = Reflect.ownKeys(local.env);
+    if (envKeys.some((k) => !['PATH', 'LANG', 'TZ'].includes(k)))
+      throw Error('Allowlisted environment required');
+    local.env = Object.freeze(reviewRecord(local.env, envKeys));
+    if (
+      Object.values(local.env).some(
+        (v) =>
+          typeof v !== 'string' || v.includes('\0') || Buffer.byteLength(v) > limits.maxInputBytes,
+      ) ||
+      ['executable', 'childScript', 'sourceDigest', 'trustedInstructions'].some(
+        (k) =>
+          typeof local[k] !== 'string' ||
+          !local[k].length ||
+          local[k].includes('\0') ||
+          Buffer.byteLength(local[k]) > limits.maxInputBytes,
+      ) ||
+      !isAbsolute(local.executable) ||
+      !isAbsolute(local.childScript) ||
+      !/^[a-f0-9]{64}$/.test(local.sourceDigest)
+    )
+      throw Error('Exact trusted local config required');
+    const localConfig = Object.freeze(local);
+    const port = captureReviewMethods(q.port, [
+      'withPrLock',
+      'observe',
+      'readJournal',
+      'verifyWorkerCallback',
+      'verifyWorker',
+      'append',
+      'draft',
+    ]);
+    const ledger = q.ledger;
+    const resolver = createConsumedReviewResolver({ ledger, originAuthority: q.originAuthority });
+    const ledgerMethods = captureReviewMethods(ledger, [
+      'withFunding',
+      'read',
+      'observe',
+      'forOrigin',
+    ]);
+    const resolve = q.originAuthority.resolve.bind(q.originAuthority);
+    const material = captureReviewMethods(q.materialTransport, ['open', 'verifyCompletion']);
+    const runner = captureReviewMethods(q.runnerPort, [
+      'now',
+      'spawn',
+      'abortGroup',
+      'joinGroup',
+      'disposeHome',
+    ]);
+    const proxy = captureReviewMethods(q.proxyPort, ['open', 'verifyCompletion']);
+    const context = reviewRecord(q.callbackContext, ['publicKey']);
+    if (!(context.publicKey instanceof KeyObject) || context.publicKey.type !== 'public')
+      throw Error('Synthetic public verification key required');
+    const keyBytes = context.publicKey.export({ type: 'spki', format: 'der' });
+    const publicKey = createPublicKey({ key: Buffer.from(keyBytes), type: 'spki', format: 'der' });
+    const snapshotCandidate = (value) => {
+      const candidate = reviewRecord(value, v2CandidateFields);
+      if (!validCandidate(candidate) || candidate.protocolVersion !== 2)
+        throw Error('Complete v2 candidate required');
+      return Object.freeze(candidate);
+    };
+    return Object.freeze({
+      async run(input) {
+        let timer, controller;
+        try {
+          const data = reviewRecord(input, ['candidate', 'reservationRequestId']);
+          const candidate = snapshotCandidate(data.candidate),
+            reservationRequestId = data.reservationRequestId;
+          if (!requestId(reservationRequestId)) return blocked('Registered call request required');
+          controller = new AbortController();
+          const started = runner.now(),
+            expiresAt = started + duration;
+          if (!Number.isFinite(started) || !Number.isFinite(expiresAt) || expiresAt <= started)
+            return blocked('Monotonic deadline unavailable');
+          const remainingMs = () => {
+            const current = runner.now();
+            if (!Number.isFinite(current) || current < started) {
+              controller.abort('Clock unavailable');
+              return 0;
+            }
+            return Math.max(0, expiresAt - current);
+          };
+          const live = () => {
+            if (controller.signal.aborted || remainingMs() <= 0) {
+              controller.abort('Review deadline');
+              throw Error('Review deadline');
+            }
+          };
+          const arm = () => {
+            const remaining = remainingMs();
+            if (remaining <= 0) {
+              controller.abort('Review deadline');
+              return;
+            }
+            timer = setTimeout(arm, Math.min(duration, remaining));
+          };
+          arm();
+          const deadline = Object.freeze({
+            signal: controller.signal,
+            expiresAt,
+            remainingMs,
+            cancel: (reason) => controller.abort(reason),
+          });
+          const wait = (operation) => reviewAwait(operation, controller.signal, live);
+          const origin = await wait(() => resolve({ candidate, reservationRequestId }));
+          if (origin.kind !== 'verified') return origin;
+          const receipt = origin.value;
+          const extracted = await wait(() =>
+            extractReviewMaterial(candidate, material, limits, deadline.signal),
+          );
+          if (extracted.kind !== 'verified') return extracted;
+          live();
+          const invocation = buildReviewInvocation(localConfig, extracted.value, limits);
+          if (invocation.kind !== 'verified') return invocation;
+          const observed = await wait(() =>
+            ledgerMethods.withFunding(() => ledgerMethods.observe(candidate)),
+          );
+          live();
+          const facade = ledgerMethods.forOrigin(receipt, deadline);
+          // Every facade continuation checks the original deadline. A late write
+          // remains occupied; its late result cannot mint further permission.
+          const boundedFacade = Object.fromEntries(
+            ['withReservationLock', 'read', 'append', 'observe'].map((name) => [
+              name,
+              (...args) => {
+                live();
+                return facade[name](...args);
+              },
+            ]),
+          );
+          const reserved = await wait(() =>
+            reserveReviewBudget(
+              { candidate, requestId: reservationRequestId, observed },
+              limits,
+              boundedFacade,
+            ),
+          );
+          if (reserved.kind !== 'verified') return reserved;
+          const claimed = await wait(() =>
+            claimReservation(
+              reserved.value.key,
+              {
+                originReceipt: receipt,
+                materialDigest: invocation.value.materialDigest,
+                invocationDigest: invocation.value.bodyDigest,
+              },
+              ledger,
+              deadline,
+            ),
+          );
+          if (claimed.kind !== 'verified') return claimed;
+          live();
+          // The lifecycle releases funding/PR locks before invoking this closure.
+          // No late consume response may execute after the shared deadline.
+          let executing = false;
+          const completion = withClaimedReview(
+            claimed.value.id,
+            ledger,
+            async (claim, guard) => {
+              live();
+              executing = true;
+              return runBoundedReview(claim, invocation.value, guard, {
+                runnerPort: runner,
+                proxyPort: proxy,
+                localConfig,
+                deadline,
+              });
+            },
+            deadline,
+          );
+          // A hung consume must return at the same deadline. Once supervision
+          // has begun, let its bounded termination window return actual evidence.
+          return await new Promise((resolve, reject) => {
+            const abort = () => {
+              if (!executing) reject(Error('Review consumption deadline'));
+            };
+            controller.signal.addEventListener('abort', abort, { once: true });
+            if (controller.signal.aborted) abort();
+            completion
+              .then(resolve, reject)
+              .finally(() => controller.signal.removeEventListener('abort', abort));
+          });
+        } catch {
+          return {
+            kind: 'uncertain',
+            reason: 'Review deadline or preparation unavailable; retain any occupied capacity',
+            evidence: [],
+          };
+        } finally {
+          clearTimeout(timer);
+          controller?.abort('Review runtime finalized');
+        }
+      },
+      async complete(input) {
+        try {
+          const data = reviewRecord(input, ['body', 'archive']);
+          const body = data.body,
+            archive = Object.freeze(reviewRecord(data.archive, ['body', 'signature']));
+          if (
+            typeof archive.body !== 'string' ||
+            Buffer.byteLength(archive.body) > 1_000_000 ||
+            typeof archive.signature !== 'string' ||
+            archive.signature.length !== 88
+          )
+            return blocked('Bounded archive required');
+          const raw = boundedJson(body, 262144);
+          if (
+            !exactFields(raw, ['type', 'candidate', 'worker', 'outcome', 'claimId']) ||
+            raw.type !== 'worker_completed' ||
+            raw.worker !== 'review' ||
+            !['success', 'failure'].includes(raw.outcome) ||
+            !/^[a-f0-9]{64}$/.test(raw.claimId)
+          )
+            return blocked('Exact consumed review callback required');
+          const candidate = snapshotCandidate(raw.candidate),
+            claimId = raw.claimId;
+          return await ledgerMethods.withFunding(async () => {
+            const resolved = await resolver.resolve({ claimId, candidate });
+            if (resolved.kind !== 'verified') return resolved;
+            const expectedRun = Object.freeze({ ...resolved.value.run });
+            return handleTrustedWorkerCallback(
+              { body, archive },
+              { mode: 'offline-test', productionBackend: null, port, expectedRun, publicKey },
+            );
+          });
+        } catch {
+          return blocked('Review completion evidence unavailable');
+        }
+      },
+      async reconcile(input) {
+        try {
+          const data = reviewRecord(input, ['reservationKey', 'evidence']);
+          if (typeof data.evidence !== 'string' || Buffer.byteLength(data.evidence) > 1_000_000)
+            return blocked('Bounded retained evidence required');
+          return reconcileReservation(data.reservationKey, data.evidence, ledger);
+        } catch {
+          return blocked('Exact retained reconciliation evidence required');
+        }
+      },
+    });
+  } catch {
+    return closed;
+  }
+}
+const reviewLimitFields = [
+  'callsPerAttempt',
+  'maxOutputTokens',
+  'maxInputBytes',
+  'maxRunSeconds',
+  'maxConcurrentCalls',
+];
+function reviewRecord(value, fields) {
+  if (
+    !value ||
+    typeof value !== 'object' ||
+    types.isProxy(value) ||
+    ![Object.prototype, null].includes(Object.getPrototypeOf(value))
+  )
+    throw Error('Plain exact record required');
+  const keys = Reflect.ownKeys(value);
+  if (keys.length !== fields.length || keys.some((k) => !fields.includes(k)))
+    throw Error('Exact fields required');
+  const result = {};
+  for (const key of fields) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!descriptor || !Object.hasOwn(descriptor, 'value')) throw Error('Data properties required');
+    result[key] = descriptor.value;
+  }
+  return result;
+}
+function captureReviewMethods(value, names) {
+  if (!value || types.isProxy(value)) throw Error('Captured trusted provider required');
+  return Object.freeze(
+    Object.fromEntries(
+      names.map((name) => {
+        const descriptor = Object.getOwnPropertyDescriptor(value, name);
+        const method = descriptor?.value;
+        if (typeof method !== 'function') throw Error('Provider method required');
+        return [name, method.bind(value)];
+      }),
+    ),
+  );
+}
+function reviewAwait(operation, signal, live) {
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener('abort', abort);
+      reject(Error('Review deadline'));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    if (signal.aborted) return abort();
+    Promise.resolve()
+      .then(() => {
+        live();
+        return operation();
+      })
+      .then(
+        (value) => {
+          signal.removeEventListener('abort', abort);
+          try {
+            live();
+            resolve(value);
+          } catch (error) {
+            reject(error);
+          }
+        },
+        (error) => {
+          signal.removeEventListener('abort', abort);
+          reject(error);
+        },
+      );
   });
 }
