@@ -10,6 +10,8 @@
 - [Recovery and enforcement boundary](#recovery-and-enforcement-boundary)
 - [Verification](#verification)
 
+- [Dormant review composition amendment](#dormant-review-composition-amendment)
+
 ## Scope and pending gates
 
 Task 4 restores the approved baseline for `glyad/github-workspace-manager`.
@@ -195,3 +197,9 @@ using production resources. Only actual production readback can close setup.
 Deliver repository/Project URLs, actual SHAs/signatures, closure references,
 capability report and the pending gates. Do not claim live verification from
 this local staging directory.
+
+## Dormant review composition amendment
+
+The [offline review composition](runtime-bridge.md#dormant-review-composition-amendment) preserves the privileged boundary: parent-only opaque guard and fake proxy key, fixed credential-free child, and separate result-only posting fixture. Callback verification uses constructor-captured public key material and the consumed claim's immutable original full execution. A payload cannot supply either. V2 review cannot fall back to a static worker map or start callback. Funding precedes the single PR lock; accounting reconciliation cannot draft a later attempt.
+
+Local process-group and synthetic archive evidence does not establish hostile same-user isolation, GitHub-native provenance or production spending guarantees. Public forks, production backend/issuer/key/funding/limits, hosted source bootstrap, both disabled review jobs, failing activation preflights and integration retain their existing blocks. No security grant or production capability is created by this amendment.

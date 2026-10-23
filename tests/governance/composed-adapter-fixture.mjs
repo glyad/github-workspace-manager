@@ -45,17 +45,19 @@ const workerRun = { ...run, id: '6', workflowId: '8', event: 'workflow_dispatch'
 const timeline = [
   { id: 10, actor: { id: 5 }, event: 'ready_for_review', created_at: '2026-01-01T00:00:00Z' },
 ];
-const snapshot = () => ({
-  number: 2,
-  node_id: 'PR_2',
+const snapshot = (candidate = c) => ({
+  number: candidate.pr,
+  node_id: `PR_${candidate.pr}`,
   state: 'open',
   draft: false,
-  base: { sha: c.base, ref: 'develop', repo: { id: 1 } },
-  head: { sha: c.head, repo: { id: 1 } },
+  base: { sha: candidate.base, ref: 'develop', repo: { id: 1 } },
+  head: { sha: candidate.head, repo: { id: 1 } },
 });
 export async function fixture(
   t,
   {
+    candidate = c,
+    workerExecution = workerRun,
     freshReadiness = false,
     seedAdmission = !freshReadiness,
     events = freshReadiness
@@ -68,7 +70,7 @@ export async function fixture(
           },
         ]
       : timeline,
-    pr = { ...snapshot(), draft: freshReadiness },
+    pr = { ...snapshot(candidate), draft: freshReadiness },
     proof = true,
     modify = () => {},
     concreteContinuation = false,
@@ -81,6 +83,7 @@ export async function fixture(
     workerResult = { candidate: c, worker: 'ci', outcome: 'success', claimId: 'claim-1' },
   } = {},
 ) {
+  const c = candidate;
   const dir = storeRoot ?? (await mkdtemp(join(tmpdir(), 'dispatch-')));
   t.after(() => rm(dir, { recursive: true, force: true }));
   const store = new LocalDurableStore(dir);
@@ -89,7 +92,7 @@ export async function fixture(
     requestId: c.requestId,
     repositoryId: c.repositoryId,
     pr: c.pr,
-    prNodeId: 'PR_2',
+    prNodeId: pr.node_id,
     baseRef: c.baseRef,
     base: c.base,
     head: c.head,
@@ -116,7 +119,7 @@ export async function fixture(
       ref: run.ref,
     }),
     lookupRun: async () => verified(dispatchRun),
-    resolvePr: async () => verified({ repositoryId: '1', pr: 2, prNodeId: 'PR_2' }),
+    resolvePr: async () => verified({ repositoryId: '1', pr: c.pr, prNodeId: pr.node_id }),
     verifyRequestEvidence: async (body) =>
       verified({
         bodyDigest: digest(body),
@@ -131,8 +134,8 @@ export async function fixture(
     authenticateReadinessRequest(JSON.stringify(q), retainedRequestContext);
   const originalAfter = {
     repositoryId: '1',
-    pr: 2,
-    prNodeId: 'PR_2',
+    pr: c.pr,
+    prNodeId: pr.node_id,
     state: 'open',
     draft: false,
     baseRef: c.baseRef,
@@ -141,7 +144,7 @@ export async function fixture(
     events: timeline.map((e) => ({ id: String(e.id), kind: e.event, actorId: '5' })),
     complete: true,
     order: 'native',
-    nativeDigest: digest(JSON.stringify({ p: snapshot(), events: timeline })),
+    nativeDigest: digest(JSON.stringify({ p: snapshot(c), events: timeline })),
   };
   originalAfter.evidenceDigest = readinessWindowDigest(originalAfter);
   const retainedProof = {
@@ -159,7 +162,7 @@ export async function fixture(
   const proofBody = JSON.stringify(retainedProof),
     proofDigest = digest(proofBody);
   if (seedAdmission && (await store.readOperation(c.requestId)).value === null)
-    await store.withPrLock('1:2', async () => {
+    await store.withPrLock(`1:${c.pr}`, async () => {
       let o = {
         version: 2,
         request,
@@ -315,7 +318,7 @@ export async function fixture(
       if (loseResponse) throw Error('response lost after accepted send');
       return { status: 204, headers: {}, body: '' };
     }
-    if (req.path.endsWith('/pulls/2')) body = pr;
+    if (req.path.endsWith(`/pulls/${c.pr}`)) body = pr;
     else if (req.path.endsWith('/issues/7')) body = { id: 7, user: { id: 5 } };
     else if (req.path.includes('/timeline?')) body = events;
     else if (req.path.includes('/comments?')) body = comments;
@@ -335,7 +338,7 @@ export async function fixture(
       };
       comments.push(body);
     } else if (req.path.includes('/actions/runs/')) {
-      const r = req.path.includes('/runs/6/') ? workerRun : run;
+      const r = req.path.includes('/runs/6/') ? workerExecution : run;
       body = {
         id: Number(r.id),
         run_attempt: r.attempt,
@@ -438,6 +441,7 @@ export async function fixture(
     store,
     calls,
     comments,
+    events,
     dir,
     pr,
     claim,

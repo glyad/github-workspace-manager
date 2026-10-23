@@ -1,4 +1,4 @@
-import { blocked, verified, exactFields, validBaseRef } from './contracts.mjs';
+import { blocked, verified, exactFields, validBaseRef, requestId } from './contracts.mjs';
 import { digest, sameCandidate, validCandidate } from './journal.mjs';
 const none = (reason) => ({ action: 'none', reason });
 const runKeys = ['id', 'attempt', 'repositoryId', 'workflowId', 'sha', 'event'];
@@ -97,13 +97,23 @@ export function acceptWorkerResult(candidate, runIdentity, result, observed) {
     if (!current(candidate, observed) || !sameCandidate(candidate, result?.candidate))
       return none('Stale or unadmitted candidate');
     if (
+      candidate.protocolVersion === 2 &&
+      (!requestId(result.claimId) ||
+        !exactFields(
+          result,
+          result.worker === 'review'
+            ? ['candidate', 'worker', 'outcome', 'claimId', 'model', 'effort', 'fresh', 'findings']
+            : ['candidate', 'worker', 'outcome', 'claimId'],
+        ))
+    )
+      return none('Exact v2 claim-bound result required');
+    if (
       observed.expectedWorker !== result.worker ||
       (candidate.protocolVersion === 2 &&
         (!sameExecution(runIdentity, observed.expectedRun) ||
           !sameExecution(runIdentity, observed.attestation?.run) ||
-          (result.worker === 'ci' &&
-            (typeof observed.expectedClaimId !== 'string' ||
-              result.claimId !== observed.expectedClaimId)))) ||
+          typeof observed.expectedClaimId !== 'string' ||
+          result.claimId !== observed.expectedClaimId)) ||
       !sameRun(runIdentity, observed.expectedRun) ||
       runIdentity.repositoryId !== candidate.repositoryId ||
       observed.attestation?.verified !== true ||

@@ -56,14 +56,13 @@ export function encodeWorkerResult(result) {
     result?.worker === 'review'
       ? ['candidate', 'worker', 'outcome', 'model', 'effort', 'fresh', 'findings']
       : ['candidate', 'worker', 'outcome'];
-  if (result?.worker === 'ci' && result.candidate?.protocolVersion === 2) fields.push('claimId');
+  if (result.candidate?.protocolVersion === 2) fields.push('claimId');
   if (
     !result ||
     Object.keys(result).length !== fields.length ||
     fields.some((k) => !Object.hasOwn(result, k)) ||
     !validCandidate(result.candidate) ||
     (result.candidate?.protocolVersion === 2 &&
-      result.worker === 'ci' &&
       (typeof result.claimId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(result.claimId))) ||
     !['ci', 'review'].includes(result.worker) ||
     !['success', 'failure'].includes(result.outcome)
@@ -89,7 +88,7 @@ export function verifyResultEnvelope(body, envelope, run, candidate, worker, pub
       encodeWorkerResult(result) !== body ||
       !sameCandidate(result.candidate, candidate) ||
       result.worker !== worker ||
-      (candidate?.protocolVersion === 2 && worker === 'ci' && result.claimId !== claimId)
+      (candidate?.protocolVersion === 2 && result.claimId !== claimId)
     )
       return blocked('Result schema or candidate');
     const proof = verifyArchive(

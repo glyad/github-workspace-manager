@@ -282,3 +282,66 @@ test('signed archive parsing rejects incomplete, extra-field and unknown-version
     );
   }
 });
+
+test('v2 review requires exact claimId in result encoder and acceptor', async () => {
+  const { encodeWorkerResult } = await import('../../tools/governance/worker-transport.mjs');
+  const candidate = {
+    ...c,
+    protocolVersion: 2,
+    baseRef: 'refs/heads/develop',
+    requestId: 'ready-1',
+  };
+  const execution = { ...run, actorId: 'actor', executionSha: c.head, ref: 'refs/heads/develop' };
+  const reviewResult = {
+    candidate,
+    worker: 'review',
+    outcome: 'success',
+    model: 'gpt-6-astra',
+    effort: 'high',
+    fresh: true,
+    findings: 0,
+  };
+  assert.throws(() => encodeWorkerResult(reviewResult));
+  const claimed = { ...reviewResult, claimId: 'claim-1' };
+  assert.equal(JSON.parse(encodeWorkerResult(claimed)).claimId, 'claim-1');
+  const facts = {
+    ...review(),
+    candidate,
+    expectedRun: execution,
+    expectedWorker: 'review',
+    ci: { verified: true, candidate, outcome: 'success' },
+    attestation: { verified: true, run: execution, bodyDigest: hash(claimed) },
+  };
+  assert.equal(acceptWorkerResult(candidate, execution, claimed, facts).action, 'none');
+  assert.equal(
+    acceptWorkerResult(candidate, execution, claimed, { ...facts, expectedClaimId: 'other' })
+      .action,
+    'none',
+  );
+  assert.equal(
+    acceptWorkerResult(candidate, execution, claimed, { ...facts, expectedClaimId: 'claim-1' })
+      .action,
+    'review-success',
+  );
+});
+
+test('v2 result acceptor rejects empty claim IDs and extra fields before attestation acceptance', () => {
+  const candidate = {
+    ...c,
+    protocolVersion: 2,
+    baseRef: 'refs/heads/develop',
+    requestId: 'ready-1',
+  };
+  const execution = { ...run, actorId: 'actor', executionSha: c.head, ref: 'refs/heads/develop' };
+  for (const patch of [{ claimId: '' }, { extra: true }]) {
+    const r = { candidate, worker: 'ci', outcome: 'success', claimId: 'claim-1', ...patch };
+    const facts = {
+      ...observed(),
+      candidate,
+      expectedRun: execution,
+      expectedClaimId: r.claimId,
+      attestation: { verified: true, run: execution, bodyDigest: hash(r) },
+    };
+    assert.equal(acceptWorkerResult(candidate, execution, r, facts).action, 'none');
+  }
+});

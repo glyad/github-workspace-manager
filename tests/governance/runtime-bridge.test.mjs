@@ -847,3 +847,61 @@ test('explicit continuation runtime composes real local durable providers and st
   assert.equal((await handleTrustedWorkerCallback(input, context)).kind, 'blocked');
   assert.equal(f.calls.filter((x) => x.path.endsWith('/dispatches')).length, 1);
 });
+
+test('v2 review has no static worker mapping fallback or worker_start permission route', async (t) => {
+  const f = await fixture(t);
+  const port = createGithubPort({
+    ...f.portConfig,
+    workers: { ...f.portConfig.workers, review: workerRun },
+  });
+  for (const type of ['worker_start', 'worker_completed']) {
+    const body = JSON.stringify({
+      type,
+      candidate: c,
+      worker: 'review',
+      outcome: 'success',
+      claimId: 'a'.repeat(64),
+    });
+    const archive = signed({
+      purpose: 'worker-callback',
+      run: workerRun,
+      candidate: c,
+      worker: 'review',
+      bodyDigest: digest(body),
+    });
+    const result = await handleTrustedWorkerCallback(
+      { body, archive },
+      { port, expectedRun: workerRun, publicKey, mode: 'offline-test' },
+    );
+    assert.equal(result.kind, 'blocked');
+  }
+  assert.equal(f.calls.filter((r) => r.method === 'POST').length, 0);
+});
+
+test('read-only review observation requires the current held PR scope', async (t) => {
+  const f = await fixture(t);
+  await assert.rejects(() => f.port.observeReviewAdmission(c));
+  const result = await f.port.withPrLock('1:2', () => f.port.observeReviewAdmission(c));
+  assert.equal(result.ci.verified, false);
+  assert.equal(result.admitted, false);
+  assert.equal(f.calls.filter((r) => r.method === 'POST').length, 0);
+});
+
+test('consumed review continuation constructor rejects extra fields and accessors without invoking them', async (t) => {
+  const f = await fixture(t);
+  let invoked = 0;
+  const accessor = Object.defineProperty({}, 'resolveConsumed', {
+    enumerable: true,
+    get() {
+      invoked++;
+      return () => verified(null);
+    },
+  });
+  for (const reviewContinuation of [
+    accessor,
+    { resolveConsumed: () => verified(null), extra: true },
+    { resolveConsumed: () => verified(null), [Symbol('extra')]: true },
+  ])
+    assert.throws(() => createGithubPort({ ...f.portConfig, reviewContinuation }));
+  assert.equal(invoked, 0);
+});

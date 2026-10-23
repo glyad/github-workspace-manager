@@ -1,5 +1,6 @@
 import { sameExecution } from './worker-results.mjs';
 import { randomUUID } from 'node:crypto';
+import { types } from 'node:util';
 import { digest, parseJournal, sameCandidate, validCandidate } from './journal.mjs';
 import {
   boundedJson,
@@ -35,6 +36,7 @@ export function createGithubPort({
   workerResults,
   workers = {},
   ciContinuation,
+  reviewContinuation,
 }) {
   if (
     !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ||
@@ -45,6 +47,20 @@ export function createGithubPort({
     !store
   )
     throw Error('Unselected transport configuration');
+  let resolveReview;
+  if (reviewContinuation !== undefined) {
+    if (
+      !reviewContinuation ||
+      types.isProxy(reviewContinuation) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(reviewContinuation))
+    )
+      throw Error('Exact consumed review resolver required');
+    const keys = Reflect.ownKeys(reviewContinuation);
+    const method = Object.getOwnPropertyDescriptor(reviewContinuation, 'resolveConsumed')?.value;
+    if (keys.length !== 1 || keys[0] !== 'resolveConsumed' || typeof method !== 'function')
+      throw Error('Exact consumed review resolver required');
+    resolveReview = method.bind(reviewContinuation);
+  }
   const root = `/repos/${repository}`;
   const active = new Set();
   const ciSendable = new Map();
@@ -962,11 +978,76 @@ export function createGithubPort({
         return { kind: 'uncertain', reason: 'CI consumption readback unavailable', evidence: [] };
       return verified({ newlyConsumed: true, claim: after.value });
     },
+    async observeReviewAdmission(input) {
+      const c = structuredClone(input);
+      if (!validCandidate(c) || c.protocolVersion !== 2 || !active.has(keyOf(c)))
+        throw Error('Read-only admission requires held PR scope');
+      const o = await port.observe(c),
+        journal = await port.readJournal(c);
+      if (journal.kind !== 'verified') throw Error('Admission history unavailable');
+      const decision = decideReadiness(
+        o,
+        {
+          type: 'worker_start',
+          worker: 'review',
+          candidate: c,
+          repositoryId: c.repositoryId,
+          pr: c.pr,
+          readinessId: c.attempt,
+        },
+        journal,
+      );
+      const rows = journal.value.filter((r) => sameCandidate(r.candidate, c));
+      return {
+        candidate: candidateOf(o),
+        nativeVerified: o.nativeVerified,
+        lifecycleVerified: o.lifecycle.verified,
+        ready: o.state === 'open' && !o.draft && o.readiness.kind === 'ready_for_review',
+        sameRepository: o.sameRepository,
+        admitted: decision.action === 'start-review' && sameCandidate(decision.candidate, c),
+        invalidated:
+          o.lifecycle.closedSinceReady ||
+          journal.value.some(
+            (r) =>
+              r.candidate.pr === c.pr &&
+              r.candidate.attempt === c.attempt &&
+              ['invalidate', 'draft'].includes(r.action),
+          ),
+        ci: {
+          verified: rows.some((r) => r.action === 'ci-success' && r.phase === 'result'),
+          candidate: c,
+          outcome: 'success',
+        },
+      };
+    },
+    async resolveReviewContinuation(event) {
+      if (event.type !== 'worker_completed' || event.worker !== 'review' || !resolveReview)
+        return blocked('Consumed review resolver required; start callbacks forbidden');
+      const resolved = await resolveReview({
+        claimId: event.claimId,
+        candidate: structuredClone(event.candidate),
+      });
+      if (
+        resolved?.kind !== 'verified' ||
+        resolved.value?.claim?.id !== event.claimId ||
+        !sameCandidate(resolved.value.claim.candidate, event.candidate) ||
+        !sameExecution(resolved.value.run, resolved.value.claim.run)
+      )
+        return blocked('Original review claim unavailable');
+      return verified(
+        Object.freeze({
+          ...structuredClone(resolved.value.claim),
+          run: Object.freeze({ ...resolved.value.run }),
+        }),
+      );
+    },
     async verifyWorkerCallback(event, callbackRun) {
       const continuation =
         event.candidate?.protocolVersion === 2 && event.worker === 'ci'
           ? await port.resolveCiContinuation(event)
-          : null;
+          : event.candidate?.protocolVersion === 2 && event.worker === 'review'
+            ? await port.resolveReviewContinuation(event)
+            : null;
       const expected = continuation ? continuation.value?.run : workers[event.worker];
       if (
         !expected ||
@@ -974,11 +1055,13 @@ export function createGithubPort({
           ? !sameExecution(expected, callbackRun)
           : JSON.stringify(expected) !== JSON.stringify(callbackRun))
       )
-        throw Error('Unmapped worker callback');
+        return blocked('Unmapped worker callback');
       if (
         continuation &&
         (continuation.kind !== 'verified' ||
-          (event.type === 'worker_completed' && !validStart(continuation.value)))
+          (event.type === 'worker_completed' &&
+            event.worker === 'ci' &&
+            !validStart(continuation.value)))
       )
         return blocked('CI start consumption required');
       await lookupRun(expected);
@@ -988,8 +1071,14 @@ export function createGithubPort({
       const continuation =
         event.candidate?.protocolVersion === 2 && event.worker === 'ci'
           ? await port.resolveCiContinuation(event)
-          : null;
-      if (continuation && (continuation.kind !== 'verified' || !validStart(continuation.value)))
+          : event.candidate?.protocolVersion === 2 && event.worker === 'review'
+            ? await port.resolveReviewContinuation(event)
+            : null;
+      if (
+        continuation &&
+        (continuation.kind !== 'verified' ||
+          (event.worker === 'ci' && !validStart(continuation.value)))
+      )
         return blocked('Persisted CI start required');
       const selectedRun = continuation ? continuation.value?.run : workers[event.worker];
       // Keep the selected scalar execution independent of mutable provider/mapping
