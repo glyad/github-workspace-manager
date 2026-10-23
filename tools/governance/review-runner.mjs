@@ -434,8 +434,10 @@ export async function runBoundedReview(claimInput, invocationInput, guard, optio
     if (deadline) deadline.cancel('Supervisor stopped');
     if (!spawnAttempted) noChild = true;
   } finally {
-    // One fixed cleanup window; never another provider budget or AbortController.
+    // Cleanup-only cancellation stops losing joins; it never replaces the execution deadline.
     const cleanupUntil = performance.now() + 1000;
+    const cleanupController = new AbortController();
+    const cleanupTimer = setTimeout(() => cleanupController.abort('cleanup expired'), 1000);
     const cleanup = async (operation) => {
       const remaining = cleanupUntil - performance.now();
       if (remaining <= 0) throw Error('cleanup expired');
@@ -459,7 +461,9 @@ export async function runBoundedReview(claimInput, invocationInput, guard, optio
         } catch {
           /* Teardown remains owned by runner. */
         }
-        const joined = await cleanup(() => runner.joinGroup(handle, {}));
+        const joined = await cleanup(() =>
+          runner.joinGroup(handle, { signal: cleanupController.signal }),
+        );
         if (joined?.kind === 'verified') group = groupProof(joined.value);
       } catch {
         /* Unknown execution retains an explicit runner teardown obligation. */
@@ -471,6 +475,8 @@ export async function runBoundedReview(claimInput, invocationInput, guard, optio
       } catch {
         /* Fixture teardown retains home obligation. */
       }
+    cleanupController.abort('cleanup finished');
+    clearTimeout(cleanupTimer);
   }
   return claim ? report() : blocked('Invalid supervisor inputs');
 }

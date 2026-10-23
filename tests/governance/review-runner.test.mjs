@@ -4,6 +4,8 @@ import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
+import childProcess from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { runBoundedReview } from '../../tools/governance/review-runner.mjs';
 import { createLocalReviewRunnerPort } from './fixtures/review-runner-port.mjs';
 import * as worker from '../../tools/governance/worker-ledger.mjs';
@@ -638,3 +640,84 @@ test('input_bytes_requires_safe_integer_before_conversion_hooks_or_io', async (t
       });
     });
 });
+
+// Run the real supervisor and runner in an owner process whose natural exit is observable.
+if (process.env.REVIEW_CLEANUP_PROBE)
+  test('cleanup_disposable_probe', async (t) => {
+    const mode = process.env.REVIEW_CLEANUP_PROBE;
+    const originalList = childProcess.execFileSync;
+    const originalSpawn = childProcess.spawn;
+    let polls = 0,
+      childPid;
+    childProcess.spawn = (...args) => {
+      const child = originalSpawn(...args);
+      if (args[2]?.detached) childPid = child.pid;
+      return child;
+    };
+    childProcess.execFileSync = (...args) => {
+      const rows = originalList(...args);
+      if (args[0] !== '/bin/ps') return rows;
+      polls++;
+      // Model a persistent live descendant observation below the actual join loop.
+      return mode === 'unjoinable' && childPid ? rows + `\n999999 1 ${childPid} S\n` : rows;
+    };
+    syncBuiltinESMExports();
+    t.after(() => {
+      childProcess.execFileSync = originalList;
+      childProcess.spawn = originalSpawn;
+      syncBuiltinESMExports();
+    });
+    const f = await setup(t, 'hang', 500);
+    if (mode === 'missing')
+      f.localConfig.executable = '/definitely-missing-task7-review-executable';
+    else {
+      const spawn = f.runnerPort.spawn;
+      f.runnerPort.spawn = (args) => {
+        const r = spawn(args);
+        assert.equal(r.kind, 'verified');
+        return {
+          kind: 'verified',
+          value: {
+            ...r.value,
+            async writeFrame(bytes, options) {
+              await r.value.writeFrame(bytes, options);
+              throw Error('Stop before provider send');
+            },
+          },
+        };
+      };
+    }
+    const r = await run(t, f);
+    assert.equal(f.stats.spawns.length, 1, 'actual spawn path must run');
+    assert.equal(f.stats.groups.length, 1, 'actual runner handle must be tracked');
+    assert.equal(r.value.providerOutcome, 'unknown');
+    assert.equal(r.value.executionEnded, false);
+    assert.equal(r.value.groupEvidenceId, null);
+    assert.ok(performance.now() - f.start < 1800, 'bounded supervisor return');
+    const returnedPolls = polls;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(polls, returnedPolls, 'cleanup must stop underlying process polling');
+    assert.equal(f.stats.opens, 0, 'no late provider open');
+    t.diagnostic(
+      JSON.stringify({ mode, polls, opens: f.stats.opens, elapsed: performance.now() - f.start }),
+    );
+  });
+for (const mode of ['missing', 'unjoinable'])
+  test(`cleanup_owner_exits_naturally_${mode}`, async () => {
+    const env = { ...process.env, REVIEW_CLEANUP_PROBE: mode };
+    delete env.NODE_TEST_CONTEXT;
+    const result = await new Promise((resolve) => {
+      childProcess.execFile(
+        process.execPath,
+        [
+          '--test',
+          '--test-name-pattern=^cleanup_disposable_probe$',
+          new URL(import.meta.url).pathname,
+        ],
+        { env, timeout: 4500, maxBuffer: 100000 },
+        (error, stdout, stderr) => resolve({ error, stdout, stderr }),
+      );
+    });
+    assert.equal(result.error, null, result.stdout + result.stderr + String(result.error));
+    assert.match(result.stdout, /"opens":0/);
+  });

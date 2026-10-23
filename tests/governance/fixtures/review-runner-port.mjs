@@ -98,12 +98,15 @@ export function createLocalReviewRunnerPort() {
           home,
           sourceDigest,
           parentExited: false,
+          spawnFailed: false,
           descendants: new Set(),
           stdout: 0,
           stderr: 0,
         };
       children.set(id, state);
-      child.on('error', () => {});
+      child.on('error', () => {
+        if (!Number.isSafeInteger(child.pid)) state.spawnFailed = true;
+      });
       child.stdin.on('error', () => {});
       child.on('exit', () => {
         state.parentExited = true;
@@ -140,6 +143,12 @@ export function createLocalReviewRunnerPort() {
     },
     async abortGroup(handle) {
       const state = lookup(handle);
+      if (state.spawnFailed || !Number.isSafeInteger(state.child.pid)) {
+        state.child.stdin.destroy();
+        state.child.stdout.destroy();
+        state.child.stderr.destroy();
+        return { kind: 'blocked', reason: 'No spawned process group to verify' };
+      }
       try {
         snapshotGroup(state);
         process.kill(-state.child.pid, 'SIGKILL');
@@ -156,6 +165,8 @@ export function createLocalReviewRunnerPort() {
       const state = lookup(handle);
       while (true) {
         if (signal?.aborted) throw Error('aborted');
+        if (state.spawnFailed || !Number.isSafeInteger(state.child.pid))
+          return { kind: 'blocked', reason: 'No spawned process group to verify' };
         const rows = snapshotGroup(state);
         // A zombie has exited and cannot execute; its OS reaping is outside this fixture.
         const descendantsExited = rows.every(
@@ -175,7 +186,17 @@ export function createLocalReviewRunnerPort() {
               evidenceId: 'group-' + state.id.token,
             }),
           };
-        await new Promise((resolve) => setTimeout(resolve, 10));
+        await new Promise((resolve, reject) => {
+          const finish = (error) => {
+            clearTimeout(timer);
+            signal?.removeEventListener('abort', abort);
+            error ? reject(error) : resolve();
+          };
+          const abort = () => finish(Error('aborted'));
+          const timer = setTimeout(() => finish(), 10);
+          signal?.addEventListener('abort', abort, { once: true });
+          if (signal?.aborted) abort();
+        });
       }
     },
     async disposeHome(home) {
