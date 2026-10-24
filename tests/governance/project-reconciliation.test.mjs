@@ -6,6 +6,11 @@ import { join } from 'node:path';
 import { LocalDurableStore } from '../../tools/governance/local-durable-store.mjs';
 import { digest } from '../../tools/governance/journal.mjs';
 import { createOfflineProjectController } from '../../tools/governance/project-reconciliation.mjs';
+import { parseProjectScope, parseProjectLifecycle } from '../../tools/governance/project-state.mjs';
+import {
+  releaseAdmission,
+  createOfflineScopeDecisionService,
+} from '../../tools/governance/scope-decisions.mjs';
 import { projectDigest } from '../../tools/governance/project-baseline.mjs';
 
 const vector = {
@@ -1774,4 +1779,246 @@ test('distinct revision domains retain within-attempt public Status query freshn
   const result = await controller.reconcile(input);
   assert.notEqual(result.kind, 'verified');
   assert.equal(env.sim.native.calls.length, 0);
+});
+
+// The composition catches loss of partitioned obligations across durable resume,
+// or projection/admission accidentally using the pre-decision scope.
+function composedSplit() {
+  const f = reparenting(),
+    after = f.input.proposed;
+  const original = clone(f.snapshot.requirements.find((r) => r.requirementId === 'work'));
+  const bytes = Buffer.from(f.bytes);
+  after.coverageCatalog.push(
+    ...[
+      ['a', 0, 8],
+      ['b', 8, bytes.length],
+    ].map(([suffix, startByte, endByte]) => ({
+      ...clone(after.coverageCatalog[0]),
+      id: 'coverage-' + suffix,
+      startByte,
+      endByte,
+      textDigest: digest(bytes.subarray(startByte, endByte)),
+      parentCoverageId: 'coverage',
+    })),
+  );
+  after.requirements.find((r) => r.requirementId === 'parent-a').coverageIds = ['coverage-b'];
+  after.requirements.find((r) => r.requirementId === 'parent-b').coverageIds = ['coverage-a'];
+  after.requirements.find((r) => r.requirementId === 'work').coverageIds = ['coverage-a'];
+  after.requirements.push({
+    ...original,
+    requirementId: 'work-b',
+    issueNodeId: 'issue-b',
+    coverageIds: ['coverage-b'],
+    milestoneId: 'v2',
+    requiredPrNodeIds: ['pr-b'],
+  });
+  seal(after);
+  f.humanInstruction =
+    'split exact acceptance bytes; retain work in v1 under existing parent-b and defer work-b to v2 using reviewed feature-control for coverage-b';
+  Object.assign(f.decision, {
+    sourceDigest: digest(f.humanInstruction),
+    afterScopeDigest: after.revision,
+    affectedRequirementIds: ['parent-a', 'parent-b', 'work', 'work-b'],
+    destinationMilestoneId: 'v2',
+    dispositionRefs: ['incorporation'],
+  });
+  f.input.dispositions = [
+    {
+      kind: 'code-disposition',
+      decisionRef: 'move',
+      scopeDigest: f.snapshot.revision,
+      requirementIds: ['work-b'],
+      coverageIds: ['coverage-b'],
+      targetSha: sha('a'),
+      method: 'feature-control',
+      sourceSha: sha('b'),
+      changeCandidate: candidate(3),
+      reviewRef: 'review',
+      validationRef: 'tested',
+      incorporationRef: 'incorporation',
+    },
+  ];
+  f.links.links.push({
+    ...clone(f.links.links.find((l) => l.issueNodeId === 'issue')),
+    issueNodeId: 'issue-b',
+    projectItemId: 'item-b',
+    milestoneId: 'v2',
+    prNodeIds: ['pr-b'],
+    observationRef: 'child-b-read',
+  });
+  f.links.links.sort((a, b) => a.issueNodeId.localeCompare(b.issueNodeId));
+  return f;
+}
+test('composed conserved split deferral recovers exact child then projects and admits current version', async (t) => {
+  let trip = false;
+  const f = composedSplit();
+  assert.equal(parseProjectScope(f.input.scope, f.input.evidence).kind, 'verified');
+  const env = await setup(t, f, async (name, row) => {
+    if (!trip && name === 'project-before-witness' && row.phase === 'receipt') {
+      trip = true;
+      throw Error('composed detached child receipt fault');
+    }
+  });
+  const originals = env.sim.originals.originals;
+  const add = (ref, bytes, actorId = 'native-observer') =>
+    originals.set(ref, { bytes, actorId, resourceId: ref, revision: 'retained-r1' });
+  add('move', f.humanInstruction, 'owner-node');
+  add('child-b-read', JSON.stringify(f.links.links.find((l) => l.issueNodeId === 'issue-b')));
+  const d = f.input.dispositions[0];
+  add('review', JSON.stringify({ candidate: d.changeCandidate, findings: [] }));
+  add('tested', JSON.stringify({ candidate: d.changeCandidate, failures: [] }));
+  add(
+    'incorporation',
+    JSON.stringify({
+      candidate: d.changeCandidate,
+      targetSha: d.targetSha,
+      sourceSha: d.sourceSha,
+      coverageIds: d.coverageIds,
+      method: d.method,
+      disabledBehaviors: [
+        { coverageId: 'coverage-b', behavior: 'deferred acceptance behavior disabled' },
+      ],
+    }),
+  );
+  enforceCurrentNativeLinks(env);
+  const stable = clone(env.sim.native.links);
+  const first = await env.controller.reconcile(env.input);
+  assert.equal(first.kind, 'uncertain', first.reason);
+  assert.equal(env.sim.native.calls.length, 1);
+  const operationId = env.sim.native.calls[0].operationId;
+  let next = await restarted(env);
+  assert.equal((await next.controller.reconcile(env.input)).kind, 'uncertain');
+  assert.equal(
+    (
+      await next.controller.recover({
+        version: 1,
+        operationId,
+        originalInput: env.input,
+        recoveryRef: 'composed-exact-detach-recovery',
+        retainedRecords: [],
+      })
+    ).kind,
+    'verified',
+  );
+  next = await restarted(env);
+  const resumed = await next.controller.reconcile(env.input);
+  assert.equal(resumed.kind, 'verified', resumed.reason);
+  assert.equal(resumed.value.operationId, operationId);
+  assert.deepEqual(
+    env.sim.native.calls.map((q) => q.step.kind),
+    ['detach-parent', 'attach-parent'],
+  );
+  for (const child of env.sim.native.links) {
+    const old = stable.find((l) => l.issueNodeId === child.issueNodeId);
+    for (const key of ['issueNodeId', 'projectItemId', 'dependencyNodeIds', 'prNodeIds'])
+      assert.deepEqual(child[key], old[key]);
+  }
+  assert.equal(
+    env.sim.native.links.find((l) => l.issueNodeId === 'issue').parentNodeId,
+    'parent-issue-b',
+  );
+  const sourceBytes = Buffer.from(f.bytes);
+  const partitions = f.input.proposed.coverageCatalog.filter(
+    (c) => c.parentCoverageId === 'coverage',
+  );
+  assert.deepEqual(
+    Buffer.concat(partitions.map((c) => sourceBytes.subarray(c.startByte, c.endByte))),
+    sourceBytes,
+  );
+  const accepted = JSON.parse(JSON.stringify(f));
+  accepted.history.steps = [
+    { decision: clone(f.decision), before: clone(f.snapshot), after: clone(f.input.proposed) },
+  ];
+  accepted.history.current = accepted.snapshot = clone(f.input.proposed);
+  accepted.lifecycle.scope = { kind: 'accepted', history: accepted.history };
+  accepted.lifecycle.projection.coverageIds = ['coverage-a'];
+  accepted.lifecycle.activities.push({
+    issueNodeId: 'issue-b',
+    kind: 'inactive',
+    observationRef: 'activity-b',
+  });
+  accepted.lifecycle.prs.push({
+    ...clone(accepted.lifecycle.prs[0]),
+    prNodeId: 'pr-b',
+    issueNodeIds: ['issue-b'],
+    candidate: candidate(2),
+    observationRef: 'pr-b-observation',
+  });
+  accepted.lifecycle.prs[0].state = 'merged';
+  accepted.lifecycle.integration = [
+    {
+      requirementId: 'work',
+      prNodeId: 'pr1',
+      candidate: candidate(),
+      mergeSha: sha('b'),
+      targetRef: 'refs/heads/develop',
+      targetSha: sha('a'),
+      validationRefs: ['validation'],
+      observationRef: 'integrated-work',
+    },
+  ];
+  accepted.lifecycle.prs.sort((a, b) => a.prNodeId.localeCompare(b.prNodeId));
+  refresh(accepted);
+  const parsed = parseProjectLifecycle(accepted.lifecycle);
+  assert.equal(parsed.kind, 'verified', parsed.reason);
+  assert.equal(parsed.value.projectState.status, 'Integrated');
+  const disposition = {
+    ...clone(f.input.dispositions[0]),
+    scopeDigest: accepted.snapshot.revision,
+  };
+  const evidence = {
+    lifecycle: accepted.lifecycle,
+    dispositions: [disposition],
+    milestoneId: 'v1',
+    targetSha: sha('a'),
+  };
+  // A later complete lifecycle observation is separate from the immutable scope operation.
+  const projected = simulator({
+    ...accepted,
+    decision: f.decision,
+    links: { ...f.links, links: clone(env.sim.native.links) },
+  });
+  for (const ref of ['activity-b', 'pr-b-observation', 'integrated-work'])
+    projected.originals.originals.set(ref, {
+      bytes: ref,
+      actorId: 'fixture-observer',
+      resourceId: ref,
+      revision: 'retained-r1',
+    });
+  const controller = createOfflineProjectController({
+    store: next.store,
+    port: projected.port,
+    resolve: projected.resolve,
+    resolveRecovery: projected.resolveRecovery,
+  });
+  const status = await controller.reconcile({
+    version: 1,
+    kind: 'status',
+    lifecycle: accepted.lifecycle,
+  });
+  assert.equal(status.kind, 'verified', status.reason);
+  assert.equal(projected.native.optionId, 'option-integrated');
+  for (const ref of ['move', 'review', 'tested', 'incorporation'])
+    projected.originals.originals.set(ref, clone(originals.get(ref)));
+  const admission = releaseAdmission(accepted.history, evidence);
+  assert.equal(admission.kind, 'verified', admission.reason);
+  assert.deepEqual(admission.value.completedRequirementIds, ['work']);
+  assert.deepEqual(admission.value.deferredRequirementIds, ['work-b']);
+  assert.equal(
+    releaseAdmission(accepted.history, { ...evidence, dispositions: [] }).kind,
+    'blocked',
+  );
+  const missing = clone(accepted.lifecycle);
+  missing.scope = { kind: 'intake', snapshot: accepted.snapshot, nativeObservationRef: 'native' };
+  missing.evidence.chains = [];
+  assert.equal(
+    releaseAdmission(accepted.history, { ...evidence, lifecycle: missing }).kind,
+    'blocked',
+  );
+  const resolvedAdmission = await createOfflineScopeDecisionService({
+    resolve: projected.resolve,
+  }).releaseAdmission(accepted.history, evidence);
+  assert.equal(resolvedAdmission.kind, 'verified', resolvedAdmission.reason);
+  assert.deepEqual(resolvedAdmission.value.completedRequirementIds, ['work']);
+  assert.deepEqual(resolvedAdmission.value.deferredRequirementIds, ['work-b']);
 });
