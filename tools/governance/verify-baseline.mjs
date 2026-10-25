@@ -63,9 +63,8 @@ export async function verifyBaseline(port, expected) {
       r.visibility === 'public' &&
       r.defaultBranch === 'main' &&
       r.allowMergeCommit === true &&
-      ['allowSquashMerge', 'allowRebaseMerge', 'allowAutoMerge', 'deleteBranchOnMerge'].every(
-        (key) => r[key] === false,
-      ),
+      r.deleteBranchOnMerge === true &&
+      ['allowSquashMerge', 'allowRebaseMerge', 'allowAutoMerge'].every((key) => r[key] === false),
     'Repository identity or merge settings differ',
     'Read back selected repository settings',
   );

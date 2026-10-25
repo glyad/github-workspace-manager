@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { desiredProtections } from '../../tools/governance/protections.mjs';
 import { verifyBaseline } from '../../tools/governance/verify-baseline.mjs';
 
@@ -31,7 +32,7 @@ function observation() {
       allowSquashMerge: false,
       allowRebaseMerge: false,
       allowAutoMerge: false,
-      deleteBranchOnMerge: false,
+      deleteBranchOnMerge: true,
     },
     project: { id: 'PVT_project', public: true, verified: true },
     branches: {
@@ -175,9 +176,50 @@ test('verified baseline permits Draft work but keeps integration and release blo
   assert.equal(result.value.baselineComplete, true);
   assert.equal(result.value.ordinaryDraftWorkAllowed, true);
   assert.equal(result.value.ordinaryIntegrationAllowed, false);
+  assert.equal(result.value.releaseAllowed, false);
+  assert.equal(result.value.actionsActivationAllowed, false);
   assert.equal(result.value.components.codeScanning.status, 'blocked');
 });
+test('checked-in repository configuration selects cleanup and preserves merge safeguards', async () => {
+  const config = JSON.parse(
+    await readFile(new URL('../../governance/repository.json', import.meta.url)),
+  );
+  assert.equal(config.deleteBranchOnMerge, true);
+  assert.equal(config.allowMergeCommit, true);
+  for (const key of ['allowAutoMerge', 'allowSquashMerge', 'allowRebaseMerge'])
+    assert.equal(config[key], false);
+});
 const badCases = [
+  [
+    'historical false cleanup setting',
+    (v) => {
+      v.repository.deleteBranchOnMerge = false;
+    },
+  ],
+  [
+    'auto-merge enabled',
+    (v) => {
+      v.repository.allowAutoMerge = true;
+    },
+  ],
+  [
+    'merge commits disabled',
+    (v) => {
+      v.repository.allowMergeCommit = false;
+    },
+  ],
+  [
+    'squash merging enabled',
+    (v) => {
+      v.repository.allowSquashMerge = true;
+    },
+  ],
+  [
+    'rebase merging enabled',
+    (v) => {
+      v.repository.allowRebaseMerge = true;
+    },
+  ],
   [
     'temporary bypass leakage',
     (v) => {
@@ -355,7 +397,7 @@ test('documented unavailable security is unsupported rather than invented enable
 // Boundary fake models REST state, not normalization or verification conclusions.
 const { createBaselineGitHubPort } = await import('../../tools/governance/verify-baseline.mjs');
 const { createProtectionGitHubPort } = await import('../../tools/governance/protections.mjs');
-function githubFixture() {
+function githubFixture(deleteBranchOnMerge = true) {
   const state = {
     mutations: [],
     rulesets: [],
@@ -371,7 +413,7 @@ function githubFixture() {
     allow_squash_merge: false,
     allow_rebase_merge: false,
     allow_auto_merge: false,
-    delete_branch_on_merge: false,
+    delete_branch_on_merge: deleteBranchOnMerge,
     security_and_analysis: {
       secret_scanning: { status: 'disabled' },
       secret_scanning_push_protection: { status: 'disabled' },
@@ -585,6 +627,7 @@ test('production baseline observer binds actual refs, signatures, local checks a
   });
   const result = await port.observeBaseline('R_repo');
   assert.equal(result.kind, 'verified');
+  assert.equal(result.value.repository.deleteBranchOnMerge, true);
   assert.equal(result.value.branches.main.sha, expected.mainSha);
   assert.equal(result.value.branches.develop.signatureVerified, true);
   assert.equal(result.value.localChecks.passed, true);
@@ -1201,4 +1244,20 @@ test('disabled pending policy never bypasses closure or restoration phase admiss
   assert.equal(restoration.kind, 'verified');
   assert.equal(restoration.value.ordinaryDraftWorkAllowed, false);
   assert.equal(restoration.value.components.actionsPolicy.status, 'pending-activation');
+});
+
+test('production observer preserves false cleanup readback for verifier rejection', async () => {
+  const f = githubFixture(false);
+  const port = await createBaselineGitHubPort({
+    expected: { ...expected, closureIssueId: 'I_ledger' },
+    execute: f.execute,
+    ...baselineCallbacks(),
+  });
+  const observed = await port.observeBaseline('R_repo');
+  assert.equal(observed.kind, 'verified');
+  assert.equal(observed.value.repository.deleteBranchOnMerge, false);
+  const result = await verifyBaseline(port, expected);
+  assert.equal(result.kind, 'blocked');
+  assert.equal(result.value.components.repository.status, 'blocked');
+  assert.equal(f.state.mutations.length, 0);
 });
