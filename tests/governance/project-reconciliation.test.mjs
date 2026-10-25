@@ -1559,11 +1559,11 @@ test('lookup verifies empty namespace as null and rejects malformed/wrong/unboun
     'verified',
   );
 });
-async function bindEmptyFixturePlan(store, inputDigest, authorityDigest) {
+async function bindEmptyFixturePlan(store, inputDigest, authorityDigest, projectId = 'project') {
   const plan = {
     version: 1,
     repositoryId: 'repo',
-    projectId: 'project',
+    projectId,
     inputDigest,
     authorityDigest,
     steps: [],
@@ -1571,7 +1571,7 @@ async function bindEmptyFixturePlan(store, inputDigest, authorityDigest) {
   const logical = {
     version: 1,
     repositoryId: 'repo',
-    projectId: 'project',
+    projectId,
     planDigest: projectDigest(plan),
     authorityDigest,
     stepCount: 0,
@@ -1628,6 +1628,77 @@ for (const missing of ['index-directory', 'index-entry', 'binding', 'whole-log',
       'uncertain',
     );
   });
+test('paired metadata loss with independent lifecycle log retained blocks lookup, fresh binding and reconciliation', async (t) => {
+  const env = await setup(t);
+  const inputDigest = projectDigest(env.input);
+  assert.equal(
+    (await bindEmptyFixturePlan(env.store, inputDigest, 'a'.repeat(64))).kind,
+    'verified',
+  );
+  const before = await env.store.findProjectLifecycle(lookupFor(env.input));
+  const operationId = before.value.binding.operationId;
+  const scope = join(env.root, `${digest('project-lifecycle:repo:project')}.project-lifecycle`);
+  const { readFile } = await import('node:fs/promises');
+  const log = join(env.root, `${digest('project-records:' + operationId)}.jsonl`);
+  const retained = await readFile(log);
+  await rm(join(scope, 'index', operationId));
+  await rm(join(scope, 'operations', operationId), { recursive: true });
+  const next = await restarted(env); // Original root and separately retained identity survive.
+  for (const query of [
+    lookupFor(env.input),
+    { ...lookupFor(env.input), inputDigest: 'f'.repeat(64) },
+  ])
+    assert.equal((await next.store.findProjectLifecycle(query)).kind, 'uncertain');
+  let entered = false;
+  assert.equal(
+    (
+      await next.store.withProjectLifecycleLock(before.value.binding, async () => {
+        entered = true;
+        return { kind: 'verified', value: null, evidence: [] };
+      })
+    ).kind,
+    'uncertain',
+  );
+  assert.equal(entered, false);
+  assert.equal((await next.controller.reconcile(env.input)).kind, 'uncertain');
+  assert.equal(env.sim.native.calls.length, 0);
+  assert.deepEqual(await readFile(log), retained);
+});
+
+test('journal completeness preserves independent Project contexts and generic store logs', async (t) => {
+  const env = await setup(t);
+  assert.equal(
+    (await bindEmptyFixturePlan(env.store, projectDigest(env.input), 'a'.repeat(64))).kind,
+    'verified',
+  );
+  const other = new LocalDurableStore(env.root);
+  assert.equal(
+    (await other.initializeProjectLifecycle({ repositoryId: 'repo', projectId: 'other-project' }))
+      .kind,
+    'verified',
+  );
+  assert.equal(
+    (await bindEmptyFixturePlan(other, 'f'.repeat(64), 'b'.repeat(64), 'other-project')).kind,
+    'verified',
+  );
+  await other.append('unrelated-generic-log', { fixture: true });
+  const next = await restarted(env);
+  assert.equal((await next.store.findProjectLifecycle(lookupFor(env.input))).kind, 'verified');
+  assert.equal(
+    (
+      await next.store.findProjectLifecycle({
+        ...lookupFor(env.input),
+        inputDigest: 'e'.repeat(64),
+      })
+    ).value,
+    null,
+  );
+  assert.equal(
+    (await bindEmptyFixturePlan(next.store, 'e'.repeat(64), 'c'.repeat(64))).kind,
+    'verified',
+  );
+});
+
 test('same-input creation between discovery and acquisition reuses retained plan without duplicate registration', async (t) => {
   const env = await setup(t),
     input = { version: 1, kind: 'status', lifecycle: env.f.lifecycle };

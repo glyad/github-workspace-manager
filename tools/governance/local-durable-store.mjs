@@ -214,6 +214,51 @@ export class LocalDurableStore {
       return projectUncertain('Project lifecycle history unavailable');
     }
   }
+  async #projectJournalMembership(index) {
+    const identity = projectRoots.get(this),
+      journals = [];
+    let count = 0,
+      bytes = 0;
+    const directory = await fs.opendir(this.root);
+    for await (const entry of directory) {
+      if (++count > 1000) throw Error('Project root entry bound');
+      if (!entry.name.endsWith('.jsonl')) continue;
+      const file = join(this.root, entry.name),
+        st = await fs.lstat(file);
+      bytes += st.size;
+      if (!st.isFile() || bytes > 8388608) throw Error('Project journal scan bound');
+      const body = await fs.readFile(file, 'utf8');
+      if (Buffer.byteLength(body) !== st.size) throw Error('Project journal changed');
+      const first = JSON.parse(body.split('\n', 1)[0]);
+      if (first.previous !== '' || first.hash !== digest(JSON.stringify(['', first.value])))
+        throw Error('Project journal prefix unavailable');
+      const record = first.value;
+      if (record?.operationId && record?.phase) {
+        const binding = record.data?.binding;
+        validateProjectBinding(binding);
+        validateProjectRecords(binding, [record]);
+        if (entry.name !== `${digest('project-records:' + binding.operationId)}.jsonl`)
+          throw Error('Project journal identity');
+        if (
+          binding.repositoryId === identity.repositoryId &&
+          binding.projectId === identity.projectId &&
+          !index.includes(binding.operationId)
+        )
+          throw Error('Unregistered Project journal');
+      }
+      // Membership evidence only: journal contents never recreate a binding or lease.
+      journals.push({
+        name: entry.name,
+        dev: st.dev,
+        ino: st.ino,
+        size: st.size,
+        mtimeMs: st.mtimeMs,
+        ctimeMs: st.ctimeMs,
+        prefix: first.hash,
+      });
+    }
+    return journals.sort((a, b) => a.name.localeCompare(b.name));
+  }
   async #projectNamespace() {
     const path = await this.#verifyProjectLifecycle();
     if (JSON.stringify(await projectRead(join(path, 'index.json'))) !== '[]')
@@ -235,7 +280,8 @@ export class LocalDurableStore {
     const entries = [];
     for (const operationId of index)
       entries.push({ operationId, binding: await projectRead(join(path, 'index', operationId)) });
-    return { index, digest: projectDigest({ metadata, entries }) };
+    const journals = await this.#projectJournalMembership(index);
+    return { index, digest: projectDigest({ metadata, entries, journals }) };
   }
   async findProjectLifecycle(input) {
     try {
@@ -283,6 +329,7 @@ export class LocalDurableStore {
         typeof run !== 'function'
       )
         throw Error('Project lock context');
+      await this.#projectNamespace();
       const lock = join(path, 'lock');
       await fs.mkdir(lock, { mode: 0o700 });
       const st = await fs.stat(lock);
@@ -300,7 +347,7 @@ export class LocalDurableStore {
       await projectSync(lock);
       await projectSync(path);
       projectOwners.set(owner.token, { store: this, ended: false });
-      const operations = (await fs.readdir(join(path, 'index'))).sort();
+      const { index: operations } = await this.#projectNamespace();
       for (const operationId of operations) {
         const h = await this.#projectLifecycleHistory(operationId);
         const state = validateProjectRecords(h.binding, h.records);
