@@ -16,7 +16,7 @@
   "allowSquashMerge": false,
   "allowRebaseMerge": false,
   "allowAutoMerge": false,
-  "deleteBranchOnMerge": false,
+  "deleteBranchOnMerge": true,
   "allowForcePush": false,
   "baselineProtectionPolicy": {
     "main": ["required_signatures", "non_fast_forward", "deletion"],

@@ -522,7 +522,7 @@ export function createBaselineGitHubPort({ root, actorId, execute = execFileSync
         allow_squash_merge: false,
         allow_rebase_merge: false,
         allow_auto_merge: false,
-        delete_branch_on_merge: false,
+        delete_branch_on_merge: true,
         merge_commit_title: 'PR_TITLE',
         merge_commit_message: 'PR_BODY',
       };
@@ -606,7 +606,7 @@ export function createBaselineGitHubPort({ root, actorId, execute = execFileSync
         allow_squash_merge: false,
         allow_rebase_merge: false,
         allow_auto_merge: false,
-        delete_branch_on_merge: false,
+        delete_branch_on_merge: true,
         merge_commit_title: 'PR_TITLE',
         merge_commit_message: 'PR_BODY',
       });
