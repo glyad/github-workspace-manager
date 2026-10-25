@@ -77,6 +77,7 @@ export async function fixture(
     loseResponse = false,
     discovery = 'exact',
     storeRoot,
+    beforeCleanup = async () => {},
     restoredComments = [],
     boundary,
     archiveBoundary,
@@ -85,7 +86,13 @@ export async function fixture(
 ) {
   const c = candidate;
   const dir = storeRoot ?? (await mkdtemp(join(tmpdir(), 'dispatch-')));
-  t.after(() => rm(dir, { recursive: true, force: true }));
+  t.after(async () => {
+    try {
+      await beforeCleanup();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
   const store = new LocalDurableStore(dir);
   const request = {
     protocolVersion: 2,

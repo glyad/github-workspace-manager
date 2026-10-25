@@ -22,7 +22,22 @@ async function setup(t, options = {}) {
   const fixtureLimits = options.oneConcurrent ? { ...limits, maxConcurrentCalls: 1 } : limits;
   const ports = new Map();
   const run = { ...workerRun, executionSha: c.head };
-  const f = await fixture(t, { workerExecution: run, events: structuredClone(timeline) });
+  let observationStarted = false,
+    enteredObservation,
+    settledObservation;
+  const observationEntered = new Promise((resolve) => {
+    enteredObservation = resolve;
+  });
+  const observationSettled = new Promise((resolve) => {
+    settledObservation = resolve;
+  });
+  const f = await fixture(t, {
+    workerExecution: run,
+    events: structuredClone(timeline),
+    beforeCleanup: async () => {
+      if (observationStarted) await observationSettled;
+    },
+  });
   let port;
   const row = registration(c, 'paid-1', fixtureLimits);
   row.run = run;
@@ -72,14 +87,22 @@ async function setup(t, options = {}) {
     originAuthority,
     observeUnderPrLock: async (candidate) => {
       locks.push('funding->pr');
-      if (locks.length === options.delayObservation)
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-      const selected = ports.get(candidate.pr);
-      return selected.withPrLock(`${candidate.repositoryId}:${candidate.pr}`, async () => ({
-        ...observation(candidate),
-        ...(await selected.observeReviewAdmission(candidate)),
-        ...(options.absentFacts ? { fundingActivated: false } : {}),
-      }));
+      const delayed = locks.length === options.delayObservation;
+      if (delayed) {
+        observationStarted = true;
+        enteredObservation();
+      }
+      try {
+        if (delayed) await new Promise((resolve) => setTimeout(resolve, 1500));
+        const selected = ports.get(candidate.pr);
+        return await selected.withPrLock(`${candidate.repositoryId}:${candidate.pr}`, async () => ({
+          ...observation(candidate),
+          ...(await selected.observeReviewAdmission(candidate)),
+          ...(options.absentFacts ? { fundingActivated: false } : {}),
+        }));
+      } finally {
+        if (delayed) settledObservation();
+      }
     },
     verifyOutcome: () => ({ kind: 'blocked', reason: 'No retained settlement evidence' }),
   });
@@ -292,6 +315,8 @@ async function setup(t, options = {}) {
     locks,
     writeEntered,
     releaseWrite,
+    observationEntered,
+    observationSettled,
     stats: () => ({ sends, spawns, cancelled }),
     setResult: (claimId, patch = {}) => {
       result = {
@@ -592,7 +617,8 @@ for (const [observationNumber, expectedKinds] of [
     const result = await f.engine.run({ candidate: c, reservationRequestId: 'paid-1' });
     assert.equal(result.kind, 'uncertain');
     assert.ok(performance.now() - start < 1450);
-    await new Promise((resolve) => setTimeout(resolve, 750));
+    await f.observationEntered;
+    await f.observationSettled;
     const retained = await f.store.readReviewFunding(
       'runtime-fixture',
       digest(JSON.stringify(['review-limits-v1', ...Object.values(limits)])),
