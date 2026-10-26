@@ -127,6 +127,7 @@ export function decideDraft({ eventName, event, repo, pr, timeline, workflow, ru
       run.head_branch !== pr.head.ref ||
       !sha(run.head_sha) ||
       run.head_sha !== sent.head_sha ||
+      run.head_sha !== pr.head.sha ||
       associated.head?.sha !== pr.head.sha ||
       associated.head?.ref !== pr.head.ref ||
       associated.base?.sha !== pr.base.sha ||

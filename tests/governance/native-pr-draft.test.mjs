@@ -28,7 +28,7 @@ function fixture(kind = 'push') {
     repository: structuredClone(repo),
     head_repository: structuredClone(repo),
     head_branch: pr.head.ref,
-    head_sha: sha('c'),
+    head_sha: sha('b'),
     event: 'pull_request',
     status: 'completed',
     conclusion: 'failure',
@@ -400,4 +400,27 @@ test('missing API identity, forbidden responses and unbounded history cannot wri
     assert.equal((await handleDraftEvent(api)).action, 'manual');
     assert.equal(writes, 0);
   }
+});
+
+test('a delayed old-head CI failure cannot Draft a newer Ready head through mutable PR associations', async () => {
+  const f = fixture('failure');
+  // Observed run 40224778431 retained its old head while its PR association advanced.
+  const oldHead = '6cbaac9f4d32b981c56295e9d7b1d09b8907b5c1';
+  const currentHead = '5ffa79011b63ecb8232a60490ecd9a339d128459';
+  f.pr.head.sha = currentHead;
+  f.run.head_sha = oldHead;
+  f.run.pull_requests[0].head.sha = currentHead;
+  f.event.workflow_run = structuredClone(f.run);
+  // Delayed old-run creation falls after the new Ready witness, so time alone cannot reject it.
+  f.timeline[0].created_at = '2026-10-25T12:00:30Z';
+  const t = transport(f);
+  const api = createGitHubAdapter({
+    eventName: f.eventName,
+    event: f.event,
+    token: 'test',
+    fetchImpl: t.fetchImpl,
+  });
+  assert.equal((await handleDraftEvent(api)).action, 'noop');
+  assert.equal(t.calls.filter((call) => call.method === 'POST').length, 0);
+  assert.equal(f.pr.draft, false);
 });
