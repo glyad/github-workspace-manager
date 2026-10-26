@@ -15,6 +15,7 @@
 - [Approval and execution state](#approval-and-execution-state)
 - [Verified admission amendment](#verified-admission-amendment)
 - [Persistence boundary](#persistence-boundary)
+- [Current native setup direction](#current-native-setup-direction)
 
 ## Workflow and model policy
 
@@ -165,3 +166,11 @@ User develop-protection selection 2026-10-19: require PRs, passing CI, fresh ind
 User commit-provenance selection 2026-10-19: require cryptographically signed commits; DCO `Signed-off-by` trailers are optional. Keep Conventional Commits as a separate requirement. Verify signing for human and automation commits before enforcing the policy; this selection does not authorize key provisioning.
 
 User review-sequencing selection 2026-10-19: independent agent review starts only after CI passes for the current commit and the PR remains Ready. Revalidate base/head and readiness and reject stale evidence. Draft PRs receive neither CI nor independent review under the selected lifecycle.
+
+## Current native setup direction
+
+Owner clarification, 2026-10-25–26: execute the existing approved repository setup using native Project built-ins where sufficient and ordinary GitHub Actions otherwise. Agent logs, context and checkpoints stay local; Actions does not read or require them. External services and custom durability/provenance infrastructure are not prerequisites for these ordinary setup flows. The discarded native-amendment proposal is historical reference, not a new approval gate. The owner explicitly rejected further architecture/approval cycles for this already-approved setup; this is a bounded setup clarification, not a waiver for future product changes.
+
+Earlier dormant controllers, protocol implementations and their evidence remain preserved and unactivated; their historical contracts are not mandatory for the new ordinary native flows. Earlier statements that all Actions are disabled describe their recorded checkpoint, not the later verified ordinary CI state. Consult the current setup ledger and native runbooks for actual source delivery, access and live-acceptance status; do not infer that setup is complete.
+
+Normal GitHub PR reviews use a separate user/App, with no Copilot. The owner postponed reviewer identity/setup until the remaining setup is ready; do not ask prematurely for keys or funding, enable a paid reviewer, or incur automatic API charges. This direction supersedes the earlier custom Codex review mechanism as a setup prerequisite; it does not choose an identity, grant access or activate review. Formal approved product documents, assigned model/reasoning roles, branching, signed commits, local checks, exact-candidate independent review and current permission/protection boundaries remain in force.

@@ -14,6 +14,8 @@ Portable AI-assisted GitHub provisioning and configuration management.
 
 Repository governance and contributor baseline for the approved v0.1.0 plan. Product implementation has not started; there is no installable plugin or product CLI yet. The MVP will be installed locally from a verified GitHub Release archive once implemented. Repository automation activation and live protection evidence are tracked separately in the setup runbook.
 
+The current owner direction is to finish the approved repository setup using native Project built-ins and ordinary GitHub Actions. Agent logs, context and checkpoints stay local; Actions needs none of them. External services and custom durability/provenance infrastructure are not setup prerequisites. Reviewed Ready CI, PR Draft controls and Project synchronization source are prepared separately; Ready CI has passed an actual Linux run. Default-branch delivery and live acceptance of the remaining controls, including Project access through `PROJECTS_TOKEN`, are pending. Setup is not complete. Normal GitHub PR reviews use a separate user/App, exclude Copilot, and await the owner-postponed identity/setup decision once the remaining setup is ready. See the [current operating clarification](docs/project-instructions.md#current-native-setup-direction).
+
 ## Development
 
 Install Node.js 24.19.0 and the npm version pinned in package.json. From this checkout run:
@@ -34,6 +36,9 @@ These commands validate the governance implementation and contributor baseline. 
 - [Architecture decisions](docs/adr/README.md)
 - [Deferred backlog](BACKLOG.md)
 - [Setup operations and recovery](docs/governance/setup-runbook.md)
+- [Ready CI runbook](docs/governance/ready-ci.md) — separately prepared source, Linux run verified
+- [PR Draft-control runbook](docs/governance/pr-draft.md) — separately prepared source, hosted acceptance pending
+- [Native Project-sync runbook](docs/governance/native-project-sync.md) — source prepared, Project credential and default-branch delivery pending
 - [Owner workflow](AGENTS.md)
 
 ## Community
