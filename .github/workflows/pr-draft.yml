@@ -1,0 +1,35 @@
+name: PR Draft controls
+on:
+  pull_request_target:
+    types: [synchronize]
+    branches: [develop]
+  workflow_run:
+    workflows: [Ready CI]
+    types: [completed]
+permissions:
+  contents: read
+  actions: read
+  pull-requests: write
+# Serialize these metadata jobs only. This does not lock native GitHub edits.
+concurrency:
+  group: native-pr-draft-${{ github.repository_id }}
+  cancel-in-progress: false
+jobs:
+  draft:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Both supported events supply the default-branch commit as github.sha.
+      # Never substitute event pull_request/head/merge refs or run head_sha here.
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+      - name: Reconcile current native PR Draft metadata
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node tools/governance/native-pr-draft.mjs

@@ -1,0 +1,93 @@
+name: Ready CI
+on:
+  pull_request:
+    types: [ready_for_review]
+    branches: [develop]
+permissions:
+  contents: read
+jobs:
+  checks:
+    if: ${{ github.event.pull_request.state == 'open' && !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Verify current repository and PR against the Ready event
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'glyad/github-workspace-manager'
+          number=$(jq -er '.number | select(type == "number" and . > 0)' "$GITHUB_EVENT_PATH")
+          gh api "repos/$GITHUB_REPOSITORY" > "$RUNNER_TEMP/repository.json"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$number" > "$RUNNER_TEMP/pr.json"
+          jq -e --slurpfile event "$GITHUB_EVENT_PATH" \
+            --slurpfile repository "$RUNNER_TEMP/repository.json" '
+            $event[0] as $e | $e.pull_request as $p | $repository[0] as $r |
+            $e.action == "ready_for_review" and
+            $r.full_name == "glyad/github-workspace-manager" and
+            $r.id == $e.repository.id and $r.full_name == $e.repository.full_name and
+            .id == $p.id and .number == $e.number and
+            .state == "open" and .draft == false and
+            .base.repo.id == $r.id and .base.repo.id == $p.base.repo.id and
+            .base.ref == "develop" and .base.ref == $p.base.ref and
+            .base.sha == $p.base.sha and
+            .head.repo.id == $p.head.repo.id and
+            .head.ref == $p.head.ref and .head.sha == $p.head.sha
+          ' "$RUNNER_TEMP/pr.json"
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+      - name: Select exact npm version
+        run: npm install --global npm@11.21.1 --ignore-scripts
+      - name: Run actual local checks on the event head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = 'v24.19.0'
+          test "$(npm --version)" = '11.21.1'
+          npm ci --ignore-scripts
+          npm run check:local
+  current:
+    name: Confirm current Ready candidate
+    needs: checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    # Fresh runner: candidate code cannot alter this observation's tools or environment.
+    steps:
+      - name: Verify current repository and PR against the Ready event
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'glyad/github-workspace-manager'
+          number=$(jq -er '.number | select(type == "number" and . > 0)' "$GITHUB_EVENT_PATH")
+          gh api "repos/$GITHUB_REPOSITORY" > "$RUNNER_TEMP/repository.json"
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$number" > "$RUNNER_TEMP/pr.json"
+          jq -e --slurpfile event "$GITHUB_EVENT_PATH" \
+            --slurpfile repository "$RUNNER_TEMP/repository.json" '
+            $event[0] as $e | $e.pull_request as $p | $repository[0] as $r |
+            $e.action == "ready_for_review" and
+            $r.full_name == "glyad/github-workspace-manager" and
+            $r.id == $e.repository.id and $r.full_name == $e.repository.full_name and
+            .id == $p.id and .number == $e.number and
+            .state == "open" and .draft == false and
+            .base.repo.id == $r.id and .base.repo.id == $p.base.repo.id and
+            .base.ref == "develop" and .base.ref == $p.base.ref and
+            .base.sha == $p.base.sha and
+            .head.repo.id == $p.head.repo.id and
+            .head.ref == $p.head.ref and .head.sha == $p.head.sha
+          ' "$RUNNER_TEMP/pr.json"
