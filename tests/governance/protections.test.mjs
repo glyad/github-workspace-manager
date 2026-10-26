@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { desiredProtections } from '../../tools/governance/protections.mjs';
 import { verifyBaseline } from '../../tools/governance/verify-baseline.mjs';
 
@@ -31,7 +35,7 @@ function observation() {
       allowSquashMerge: false,
       allowRebaseMerge: false,
       allowAutoMerge: false,
-      deleteBranchOnMerge: false,
+      deleteBranchOnMerge: true,
     },
     project: { id: 'PVT_project', public: true, verified: true },
     branches: {
@@ -175,9 +179,50 @@ test('verified baseline permits Draft work but keeps integration and release blo
   assert.equal(result.value.baselineComplete, true);
   assert.equal(result.value.ordinaryDraftWorkAllowed, true);
   assert.equal(result.value.ordinaryIntegrationAllowed, false);
+  assert.equal(result.value.releaseAllowed, false);
+  assert.equal(result.value.actionsActivationAllowed, false);
   assert.equal(result.value.components.codeScanning.status, 'blocked');
 });
+test('checked-in repository configuration selects cleanup and preserves merge safeguards', async () => {
+  const config = JSON.parse(
+    await readFile(new URL('../../governance/repository.json', import.meta.url)),
+  );
+  assert.equal(config.deleteBranchOnMerge, true);
+  assert.equal(config.allowMergeCommit, true);
+  for (const key of ['allowAutoMerge', 'allowSquashMerge', 'allowRebaseMerge'])
+    assert.equal(config[key], false);
+});
 const badCases = [
+  [
+    'historical false cleanup setting',
+    (v) => {
+      v.repository.deleteBranchOnMerge = false;
+    },
+  ],
+  [
+    'auto-merge enabled',
+    (v) => {
+      v.repository.allowAutoMerge = true;
+    },
+  ],
+  [
+    'merge commits disabled',
+    (v) => {
+      v.repository.allowMergeCommit = false;
+    },
+  ],
+  [
+    'squash merging enabled',
+    (v) => {
+      v.repository.allowSquashMerge = true;
+    },
+  ],
+  [
+    'rebase merging enabled',
+    (v) => {
+      v.repository.allowRebaseMerge = true;
+    },
+  ],
   [
     'temporary bypass leakage',
     (v) => {
@@ -355,12 +400,13 @@ test('documented unavailable security is unsupported rather than invented enable
 // Boundary fake models REST state, not normalization or verification conclusions.
 const { createBaselineGitHubPort } = await import('../../tools/governance/verify-baseline.mjs');
 const { createProtectionGitHubPort } = await import('../../tools/governance/protections.mjs');
-function githubFixture() {
+function githubFixture(deleteBranchOnMerge = true) {
   const state = {
     mutations: [],
     rulesets: [],
     effective: { main: [], develop: [] },
     localTree: 'tree1',
+    localCalls: [],
   };
   const rawRepo = {
     node_id: 'R_repo',
@@ -371,13 +417,14 @@ function githubFixture() {
     allow_squash_merge: false,
     allow_rebase_merge: false,
     allow_auto_merge: false,
-    delete_branch_on_merge: false,
+    delete_branch_on_merge: deleteBranchOnMerge,
     security_and_analysis: {
       secret_scanning: { status: 'disabled' },
       secret_scanning_push_protection: { status: 'disabled' },
     },
   };
   const execute = (_binary, argv, options = {}) => {
+    if (['git', 'npm'].includes(_binary)) state.localCalls.push({ binary: _binary, argv, options });
     if (_binary === 'git' && argv.includes('status'))
       return { ok: true, stdout: state.dirty || '' };
     if (_binary === 'git' && argv.includes('HEAD'))
@@ -557,6 +604,17 @@ test('real adapter emits bounded rules/security/Actions mutations and reconciles
   assert.ok(!f.state.mutations.some((row) => row.path.endsWith('/selected-actions')));
 });
 
+async function baselineRoot(t) {
+  const root = await realpath(await mkdtemp(join(tmpdir(), 'baseline checkout-')));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await mkdir(join(root, 'governance'));
+  await writeFile(
+    join(root, 'governance/activation.json'),
+    JSON.stringify(observation().activation),
+  );
+  return root;
+}
+
 function baselineCallbacks() {
   return {
     observeProjectBaseline: async () => ({
@@ -576,15 +634,85 @@ function baselineCallbacks() {
     }),
   };
 }
-test('production baseline observer binds actual refs, signatures, local checks and callbacks', async () => {
+test('production observer uses an explicit temporary checkout for activation, git and npm', async (t) => {
+  const root = await baselineRoot(t);
   const f = githubFixture();
   const port = await createBaselineGitHubPort({
+    root,
     expected: { ...expected, closureIssueId: 'I_ledger' },
     execute: f.execute,
     ...baselineCallbacks(),
   });
   const result = await port.observeBaseline('R_repo');
   assert.equal(result.kind, 'verified');
+  assert.deepEqual(result.value.activation, observation().activation);
+  assert.ok(f.state.localCalls.some((call) => call.binary === 'npm'));
+  for (const call of f.state.localCalls)
+    if (call.binary === 'git') assert.deepEqual(call.argv.slice(0, 2), ['-C', root]);
+    else assert.equal(call.options.cwd, root);
+});
+
+test('production observer defaults to its module checkout, independent of caller cwd', async (t) => {
+  const root = await baselineRoot(t);
+  const moduleDir = join(root, 'tools/governance');
+  await mkdir(moduleDir, { recursive: true });
+  for (const name of ['verify-baseline.mjs', 'protections.mjs', 'validate.mjs', 'contracts.mjs'])
+    await copyFile(
+      new URL(`../../tools/governance/${name}`, import.meta.url),
+      join(moduleDir, name),
+    );
+  const { createBaselineGitHubPort: createCopiedPort } = await import(
+    pathToFileURL(join(moduleDir, 'verify-baseline.mjs')).href
+  );
+  const f = githubFixture();
+  const port = await createCopiedPort({
+    expected: { ...expected, closureIssueId: 'I_ledger' },
+    execute: f.execute,
+    ...baselineCallbacks(),
+  });
+  const result = await port.observeBaseline('R_repo');
+  assert.notEqual(resolve(process.cwd()), root);
+  assert.equal(result.kind, 'verified');
+  assert.deepEqual(result.value.activation, observation().activation);
+  assert.ok(f.state.localCalls.some((call) => call.binary === 'npm'));
+  for (const call of f.state.localCalls)
+    if (call.binary === 'git') assert.equal(resolve(call.argv[1]), root);
+    else assert.equal(resolve(call.options.cwd), root);
+});
+
+for (const condition of ['missing', 'unreadable'])
+  test(`production observer blocks ${condition} activation config in selected checkout`, async (t) => {
+    const root = await baselineRoot(t);
+    const config = join(root, 'governance/activation.json');
+    await rm(config);
+    // A directory cannot be read as an activation file on Linux or macOS,
+    // independent of the test user's permission to bypass file mode bits.
+    if (condition === 'unreadable') await mkdir(config);
+    const f = githubFixture();
+    const port = await createBaselineGitHubPort({
+      root,
+      expected: { ...expected, closureIssueId: 'I_ledger' },
+      execute: f.execute,
+      ...baselineCallbacks(),
+    });
+    const result = await port.observeBaseline('R_repo');
+    assert.equal(result.kind, 'blocked');
+    assert.equal(result.reason, 'Actual activation config unreadable');
+    assert.ok(!f.state.localCalls.some((call) => call.binary === 'npm'));
+    assert.equal(f.state.mutations.length, 0);
+  });
+
+test('production baseline observer binds actual refs, signatures, local checks and callbacks', async (t) => {
+  const f = githubFixture();
+  const port = await createBaselineGitHubPort({
+    root: await baselineRoot(t),
+    expected: { ...expected, closureIssueId: 'I_ledger' },
+    execute: f.execute,
+    ...baselineCallbacks(),
+  });
+  const result = await port.observeBaseline('R_repo');
+  assert.equal(result.kind, 'verified');
+  assert.equal(result.value.repository.deleteBranchOnMerge, true);
   assert.equal(result.value.branches.main.sha, expected.mainSha);
   assert.equal(result.value.branches.develop.signatureVerified, true);
   assert.equal(result.value.localChecks.passed, true);
@@ -606,10 +734,11 @@ for (const [name, configure] of [
     },
   ],
 ])
-  test(`production observer refuses validation success for ${name}`, async () => {
+  test(`production observer refuses validation success for ${name}`, async (t) => {
     const f = githubFixture();
     configure(f);
     const port = await createBaselineGitHubPort({
+      root: await baselineRoot(t),
       expected: { ...expected, closureIssueId: 'I_ledger' },
       execute: f.execute,
       ...baselineCallbacks(),
@@ -618,7 +747,7 @@ for (const [name, configure] of [
     assert.equal(result.kind, 'verified');
     assert.equal(result.value.localChecks.passed, false);
   });
-test('production observer rejects closure evidence without exact remote ledger binding', async () => {
+test('production observer rejects closure evidence without exact remote ledger binding', async (t) => {
   const f = githubFixture();
   const callbacks = baselineCallbacks();
   callbacks.observeClosure = async () => ({
@@ -627,6 +756,7 @@ test('production observer rejects closure evidence without exact remote ledger b
     evidence: [{ ...evidence()[0], resourceId: 'setup-4' }],
   });
   const port = await createBaselineGitHubPort({
+    root: await baselineRoot(t),
     expected: { ...expected, closureIssueId: 'I_ledger' },
     execute: f.execute,
     ...callbacks,
@@ -666,10 +796,11 @@ for (const [name, configure] of [
     },
   ],
 ])
-  test(`production observer blocks ${name}`, async () => {
+  test(`production observer blocks ${name}`, async (t) => {
     const f = githubFixture();
     configure(f);
     const port = await createBaselineGitHubPort({
+      root: await baselineRoot(t),
       expected: { ...expected, closureIssueId: 'I_ledger' },
       execute: f.execute,
       ...baselineCallbacks(),
@@ -1201,4 +1332,21 @@ test('disabled pending policy never bypasses closure or restoration phase admiss
   assert.equal(restoration.kind, 'verified');
   assert.equal(restoration.value.ordinaryDraftWorkAllowed, false);
   assert.equal(restoration.value.components.actionsPolicy.status, 'pending-activation');
+});
+
+test('production observer preserves false cleanup readback for verifier rejection', async (t) => {
+  const f = githubFixture(false);
+  const port = await createBaselineGitHubPort({
+    root: await baselineRoot(t),
+    expected: { ...expected, closureIssueId: 'I_ledger' },
+    execute: f.execute,
+    ...baselineCallbacks(),
+  });
+  const observed = await port.observeBaseline('R_repo');
+  assert.equal(observed.kind, 'verified');
+  assert.equal(observed.value.repository.deleteBranchOnMerge, false);
+  const result = await verifyBaseline(port, expected);
+  assert.equal(result.kind, 'blocked');
+  assert.equal(result.value.components.repository.status, 'blocked');
+  assert.equal(f.state.mutations.length, 0);
 });

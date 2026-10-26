@@ -1,0 +1,49 @@
+name: Candidate review
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  analyze:
+    # API funding, explicit limits, model availability and trust proof UNSELECTED.
+    # Unit 6 composes synthetic local providers only. No hosted dispatcher or
+    # trusted immutable-source bootstrap is installed; ref/env assertions cannot
+    # authorize a runtime import. Keep both false gates and failing preflights.
+    if: ${{ false }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Block before any Action install or analysis
+        run: |
+          echo 'Inactive: no paid execution, key, reservation transport or sandbox proof.'
+          exit 1
+      # Dormant configuration only. No API key is wired. A live adapter must first
+      # reserve a single-use call slot, enforce ALL ceilings, sanitize the trusted
+      # home/config and expose bounded PR material solely as inert data.
+      # Do not check out or run candidate scripts, AGENTS, skills, hooks or MCPs.
+      - name: Selected fresh independent reviewer recipe (unreachable)
+        uses: openai/codex-action@bdf19a4a223ec2549a3e2274a0cf61556bc07675 # v1.13
+        with:
+          model: gpt-6-astra
+          effort: high
+          safety-strategy: drop-sudo
+          permission-profile: ':read-only'
+          codex-args: '["--ephemeral"]'
+          prompt: Review only authenticated candidate data supplied by the trusted runner.
+          # CLI/proxy version and resource-enforcement adapter remain unselected.
+          # This recipe deliberately cannot authorize a model call.
+  post-result:
+    # Privileged posting must be isolated from model tools and candidate code.
+    if: ${{ false }}
+    needs: analyze
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    steps:
+      - name: Block until exact result/run proof and current admission pass
+        run: |
+          echo 'Inactive: authenticated result transport and trusted posting adapter required.'
+          exit 1

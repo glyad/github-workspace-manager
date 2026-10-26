@@ -1,0 +1,8 @@
+{
+  "commands": [
+    ["npm", "run", "test:governance"],
+    ["npm", "run", "lint"],
+    ["npm", "run", "format:check"],
+    ["npm", "run", "check:files"]
+  ]
+}

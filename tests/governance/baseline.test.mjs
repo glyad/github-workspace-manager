@@ -192,7 +192,7 @@ test('production readback rejects unverified commits and mismatched settings rat
         allow_squash_merge: false,
         allow_rebase_merge: false,
         allow_auto_merge: false,
-        delete_branch_on_merge: false,
+        delete_branch_on_merge: true,
         merge_commit_title: 'PR_TITLE',
         default_branch: 'main',
         has_pages: false,
@@ -248,7 +248,6 @@ async function observedBaselineWith(extra = [], settingsOverride = {}) {
     description: 'Portable AI-assisted GitHub provisioning and configuration management',
     merge_commit_message: 'PR_BODY',
     has_projects: true,
-    ...settingsOverride,
     node_id: 'R_1',
     full_name: 'glyad/github-workspace-manager',
     visibility: 'public',
@@ -262,8 +261,9 @@ async function observedBaselineWith(extra = [], settingsOverride = {}) {
     allow_squash_merge: false,
     allow_rebase_merge: false,
     allow_auto_merge: false,
-    delete_branch_on_merge: false,
+    delete_branch_on_merge: true,
     merge_commit_title: 'PR_TITLE',
+    ...settingsOverride,
   };
   const responses = {
     'repos/glyad/github-workspace-manager': settings,
@@ -304,6 +304,33 @@ async function observedBaselineWith(extra = [], settingsOverride = {}) {
 test('remote readback accepts exact signed baseline and equal develop', async () => {
   assert.equal((await observedBaselineWith()).kind, 'verified');
 });
+test('remote readback rejects the historical false cleanup setting', async () => {
+  assert.equal((await observedBaselineWith([], { delete_branch_on_merge: false })).kind, 'blocked');
+});
+test('settings replay selects cleanup without enabling other merge methods or trusting acknowledgement', async () => {
+  const requests = [];
+  const port = baseline.createBaselineGitHubPort({
+    root: await temp(),
+    actorId,
+    execute: (binary, args, options) => {
+      requests.push({ binary, args, body: JSON.parse(options.input) });
+      return 'HTTP/2.0 200 OK\r\n\r\n{}';
+    },
+  });
+  const result = await port.applySettings();
+  assert.equal(requests.length, 1);
+  const [{ binary, args, body }] = requests;
+  assert.equal(binary, 'gh');
+  assert.equal(args[4], 'repos/glyad/github-workspace-manager');
+  assert.equal(args[6], 'PATCH');
+  assert.deepEqual(args.slice(7), ['--input', '-']);
+  assert.equal(body.delete_branch_on_merge, true);
+  assert.equal(body.allow_merge_commit, true);
+  for (const key of ['allow_auto_merge', 'allow_squash_merge', 'allow_rebase_merge'])
+    assert.equal(body[key], false);
+  assert.notEqual(result.kind, 'verified');
+  assert.equal(result.reason, 'Settings require independent observation');
+});
 for (const [name, entry] of [
   ['gitlink', { path: 'unexpected-submodule', mode: '160000', type: 'commit', sha: 'deadbeef' }],
   [
@@ -342,7 +369,14 @@ test('a resource appearing before create cannot be adopted by resuming intent-on
   assert.notEqual((await baseline.ensureRepository(port, op)).kind, 'verified');
   assert.equal(creates, 0);
 });
-for (const patch of [{ description: 'different' }, { has_projects: false }])
+for (const patch of [
+  { description: 'different' },
+  { has_projects: false },
+  { allow_auto_merge: true },
+  { allow_merge_commit: false },
+  { allow_squash_merge: true },
+  { allow_rebase_merge: true },
+])
   test(`remote readback rejects setting mismatch ${Object.keys(patch)[0]}`, async () => {
     assert.equal((await observedBaselineWith([], patch)).kind, 'blocked');
   });
