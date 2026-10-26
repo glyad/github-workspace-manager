@@ -1,0 +1,37 @@
+name: Native Project sync
+on:
+  issues:
+    types: [opened, edited, reopened, closed, milestoned, demilestoned, typed, untyped]
+  pull_request_target:
+    types: [opened, edited, synchronize, ready_for_review, converted_to_draft, reopened, closed]
+    branches: [develop]
+  workflow_run:
+    workflows: [Ready CI]
+    types: [completed]
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+  issues: write
+concurrency:
+  group: native-project-sync
+  cancel-in-progress: false
+jobs:
+  synchronize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # These events select default-branch source, never candidate code.
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+      - name: Refresh native Issue and Project metadata
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PROJECTS_TOKEN: ${{ secrets.PROJECTS_TOKEN }}
+        run: node tools/governance/native-project-sync.mjs
