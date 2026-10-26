@@ -1,0 +1,23 @@
+name: Reviewer App authentication check
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  authenticate:
+    if: github.ref == 'refs/heads/main' && github.repository == 'glyad/github-workspace-manager'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+      - name: Verify read-only authentication and revoke token
+        env:
+          REVIEWER_APP_PRIVATE_KEY: ${{ secrets.REVIEWER_APP_PRIVATE_KEY }}
+        run: node tools/governance/reviewer-app-auth.mjs
