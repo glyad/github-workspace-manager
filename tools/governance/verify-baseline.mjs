@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { isEvidenceFor } from './validate.mjs';
 
 /**
@@ -291,8 +292,10 @@ export async function verifyBaseline(port, expected) {
  * and Task 1 closure observers. The latter must return fresh Result evidence for
  * the exact Project and setup-operation/ledger Issue; no invented IDs or success.
  * Local checks execute only on the selected actual checkout and matching final tree.
+ * Default to this module's checkout; fixtures and worktrees may select an explicit root.
  */
 export async function createBaselineGitHubPort({
+  root = fileURLToPath(new URL('../../', import.meta.url)),
   expected,
   execute,
   observeProjectBaseline,
@@ -301,7 +304,6 @@ export async function createBaselineGitHubPort({
   const { createProtectionGitHubPort } = await import('./protections.mjs');
   const { execFileSync } = await import('node:child_process');
   const { readFile } = await import('node:fs/promises');
-  const root = '/Users/davidkossoglyad/Documents/GitHub/glyad/github-workspace-manager';
   const run =
     execute ??
     ((binary, args, options = {}) => {
