@@ -352,17 +352,15 @@ export function createReader(api, config) {
   async function snapshot(number) {
     const records = new Map(),
       visiting = new Set();
-    async function visit(n, depth = 0) {
-      requireFact(
-        depth < 20 && !visiting.has(n),
-        'Native hierarchy/dependency cycle or depth bound',
-      );
+    async function visit(n) {
+      requireFact(!visiting.has(n), 'Native hierarchy/dependency cycle');
       if (records.has(n)) return;
+      // Completed and active nodes are disjoint; this also bounds acyclic depth.
       requireFact(records.size + visiting.size < 100, 'Native traversal bound');
       visiting.add(n);
       const value = await issue(n);
       for (const r of [...value.children, ...value.dependencies]) {
-        await visit(r.number, depth + 1);
+        await visit(r.number);
         requireFact(records.get(r.number).id === r.id, 'Relationship identity changed');
       }
       for (const child of value.children)
