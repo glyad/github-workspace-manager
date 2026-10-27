@@ -4,6 +4,7 @@ import {
   decideStatus,
   synchronize,
   createApi,
+  createReader,
   run,
 } from '../../tools/governance/native-project-sync.mjs';
 
@@ -477,6 +478,51 @@ test('fresh native source change prevents a write', async () => {
 test('scope/cycle bounds fail closed', async () => {
   const f = fixture([nativeIssue(1, { children: [2] }), nativeIssue(2, { children: [1] })]);
   await assert.rejects(f.sync(), /cycle/);
+  assert.equal(f.mutations.length, 0);
+});
+function dependencyChain(count) {
+  return Array.from({ length: count }, (_, i) =>
+    nativeIssue(i + 1, { dependencies: i + 1 < count ? [i + 2] : [] }),
+  );
+}
+for (const count of [26, 100])
+  test(`native reader accepts an acyclic ${count}-Issue dependency chain`, async () => {
+    const f = fixture(dependencyChain(count));
+    const snapshot = await createReader(f.api, config).snapshot(1);
+    assert.equal(snapshot.records.size, count);
+    assert.equal(snapshot.records.get(count).id, `I${count}`);
+    assert.equal(snapshot.records.get(1).id, 'I1');
+    assert.equal(snapshot.decision.status, null);
+    assert.equal(snapshot.decision.complete, false);
+    assert.equal(f.mutations.length, 0);
+  });
+test('native reader rejects a dependency cycle beyond the former depth limit', async () => {
+  const records = dependencyChain(26);
+  records[25].dependencies = [1];
+  const f = fixture(records);
+  await assert.rejects(createReader(f.api, config).snapshot(1), /cycle/);
+  assert.equal(f.calls.filter((r) => r.query?.startsWith('query Issue')).length, 26);
+  assert.equal(f.mutations.length, 0);
+});
+test('native reader rejects the 101st unique Issue before reading it', async () => {
+  const f = fixture(dependencyChain(101));
+  await assert.rejects(createReader(f.api, config).snapshot(1), /Native traversal bound/);
+  const reads = f.calls.filter((r) => r.query?.startsWith('query Issue'));
+  assert.equal(reads.length, 100);
+  assert.ok(!reads.some((r) => r.variables.number === 101));
+  assert.equal(f.mutations.length, 0);
+});
+test('native reader accepts a shared dependency at the 100-unique-Issue budget', async () => {
+  const records = dependencyChain(100);
+  records[0].dependencies.push(100);
+  const f = fixture(records);
+  const snapshot = await createReader(f.api, config).snapshot(1);
+  assert.equal(snapshot.records.size, 100);
+  assert.equal(snapshot.decision.complete, false);
+  assert.equal(
+    f.calls.filter((r) => r.query?.startsWith('query Issue') && r.variables.number === 100).length,
+    1,
+  );
   assert.equal(f.mutations.length, 0);
 });
 test('credential interface blocks explicitly and transport separates Project token', async () => {
