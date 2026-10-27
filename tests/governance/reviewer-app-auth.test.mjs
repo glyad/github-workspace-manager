@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, verify } from 'node:crypto';
+import { createHash, generateKeyPairSync, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { runAuthCheck } from '../../tools/governance/reviewer-app-auth.mjs';
+import { runAuthCheck, safeAuthError } from '../../tools/governance/reviewer-app-auth.mjs';
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const pem = privateKey.export({ type: 'pkcs8', format: 'pem' });
@@ -44,7 +44,8 @@ function fixture(change = () => {}) {
   ];
   change(values);
   const calls = [],
-    masks = [];
+    masks = [],
+    diagnostics = [];
   const fetchImpl = async (url, init) => {
     const index = calls.length;
     calls.push({ url, ...init });
@@ -57,12 +58,14 @@ function fixture(change = () => {}) {
   return {
     calls,
     masks,
+    diagnostics,
     run: () =>
       runAuthCheck({
         privateKey: pem,
         now: () => Date.parse('2026-10-27T00:00:00Z'),
         fetchImpl,
         mask: (s) => masks.push(s),
+        diagnostic: (s) => diagnostics.push(s),
       }),
   };
 }
@@ -332,4 +335,175 @@ test('no credentials reach public logs or success summary', async () => {
     console.log = original.log;
     console.error = original.error;
   }
+});
+
+for (const [index, phase] of [
+  [0, 'app'],
+  [1, 'installation'],
+]) {
+  test(`diagnoses ${phase} HTTP failure without exposing response or credentials`, async () => {
+    const f = fixture((v) => {
+      v[index] = new Response(pem + token, { status: 401 });
+    });
+    await assert.rejects(f.run(), (error) => {
+      assert.equal(error.message, `${phase}: HTTP 401`);
+      assert.ok(!error.message.includes(pem) && !error.message.includes(token));
+      return true;
+    });
+    assert.equal(f.calls.length, index + 1);
+  });
+}
+
+test('emits mathematically correct public SPKI fingerprint before first API call', async () => {
+  const diagnostics = [],
+    masks = [];
+  const expected =
+    'Public key fingerprint SHA256:' +
+    createHash('sha256')
+      .update(publicKey.export({ type: 'spki', format: 'der' }))
+      .digest('base64');
+  await assert.rejects(
+    runAuthCheck({
+      privateKey: pem,
+      diagnostic: (value) => diagnostics.push(value),
+      mask: (value) => masks.push(value),
+      fetchImpl: async () => {
+        assert.deepEqual(diagnostics, [expected]);
+        throw new Error(pem + token);
+      },
+    }),
+  );
+  assert.deepEqual(diagnostics, [expected]);
+  assert.equal(masks.length, 1);
+  assert.ok(!diagnostics.join('').includes(pem) && !diagnostics.join('').includes(masks[0]));
+});
+
+for (const [index, phase] of [
+  [0, 'app'],
+  [1, 'installation'],
+]) {
+  for (const [kind, response, expected] of [
+    ['transport', () => new Error(pem + token), `${phase}: transport failure`],
+    ['parse', () => new Response(pem + token), `${phase}: parse failure (HTTP 200)`],
+    [
+      'read',
+      () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new Error(pem + token));
+            },
+          }),
+        ),
+      `${phase}: read failure (HTTP 200)`,
+    ],
+    [
+      'redirect',
+      () => new Response(pem + token, { status: 302 }),
+      `${phase}: redirect rejected (HTTP 302)`,
+    ],
+    [
+      'limit',
+      () => new Response('a'.repeat(65537)),
+      `${phase}: response limit exceeded (HTTP 200)`,
+    ],
+  ]) {
+    test(`safe ${phase} ${kind} diagnostics preserve phase and status`, async () => {
+      const f = fixture((v) => {
+        v[index] = response();
+      });
+      await assert.rejects(f.run(), (error) => {
+        assert.equal(error.message, expected);
+        assert.equal(safeAuthError(error), expected);
+        assert.ok(!JSON.stringify(error).includes(pem));
+        assert.ok(!error.stack.includes(token));
+        for (const credential of [pem, token, ...f.masks]) {
+          assert.ok(!f.diagnostics.join('').includes(credential));
+          assert.ok(!safeAuthError(error).includes(credential));
+        }
+        return true;
+      });
+      assert.equal(f.calls.length, index + 1);
+    });
+  }
+}
+
+test('invalid untrusted status is never copied into diagnostic output', async () => {
+  const response = new Response(token);
+  Object.defineProperty(response, 'status', { value: token });
+  const f = fixture((v) => {
+    v[0] = response;
+  });
+  await assert.rejects(f.run(), (error) => {
+    assert.equal(safeAuthError(error), 'app: response failure');
+    return true;
+  });
+});
+
+test('CLI error mapper rejects arbitrary exceptions and spoofed diagnostic properties', () => {
+  const error = new Error(pem + token);
+  error.phase = 'app';
+  error.status = 401;
+  assert.equal(safeAuthError(error), 'Authentication check failed');
+  assert.equal(
+    safeAuthError({ message: token, name: 'AuthCheckError' }),
+    'Authentication check failed',
+  );
+});
+
+test('issuance and cleanup failures retain safe diagnostics without changing uncertainty or retry policy', async () => {
+  const issuance = fixture((v) => {
+    v[2] = new Response(pem + token, { status: 403 });
+  });
+  await assert.rejects(issuance.run(), (error) => {
+    assert.equal(
+      safeAuthError(error),
+      'Token issuance uncertain; no usable token received for revocation [token-issuance: HTTP 403]',
+    );
+    return true;
+  });
+  assert.equal(issuance.calls.length, 3);
+  const cleanup = fixture((v) => {
+    v[3] = new Response(token, { status: 500 });
+    v[4] = 403;
+  });
+  await assert.rejects(cleanup.run(), (error) => {
+    assert.equal(
+      safeAuthError(error),
+      'Installation read failed; token revocation failed [repository-read: HTTP 500; token-revocation: HTTP 403]',
+    );
+    return true;
+  });
+  assert.equal(cleanup.calls.length, 5);
+  assert.equal(cleanup.calls.at(-1).method, 'DELETE');
+});
+
+test('key rotation changes public diagnostic without a source pin', async () => {
+  const rotated = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const rotatedPem = rotated.privateKey.export({ type: 'pkcs8', format: 'pem' });
+  const diagnostics = [],
+    masks = [];
+  await assert.rejects(
+    runAuthCheck({
+      privateKey: rotatedPem,
+      diagnostic: (value) => diagnostics.push(value),
+      mask: (value) => masks.push(value),
+      fetchImpl: async () => {
+        throw new Error('offline');
+      },
+    }),
+    /app: transport failure/,
+  );
+  const fingerprint = createHash('sha256')
+    .update(rotated.publicKey.export({ type: 'spki', format: 'der' }))
+    .digest('base64');
+  assert.deepEqual(diagnostics, [`Public key fingerprint SHA256:${fingerprint}`]);
+  assert.notEqual(
+    fingerprint,
+    createHash('sha256')
+      .update(publicKey.export({ type: 'spki', format: 'der' }))
+      .digest('base64'),
+  );
+  for (const credential of [rotatedPem, pem, token, ...masks])
+    assert.ok(!diagnostics.join('').includes(credential));
 });
