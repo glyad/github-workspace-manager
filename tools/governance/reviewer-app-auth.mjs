@@ -8,7 +8,7 @@ const clientId = 'Iv23ctaEdWaFhBYqhbZg';
 const slug = 'glyad-workspace-reviewer';
 const granted = { contents: 'read', metadata: 'read', pull_requests: 'write' };
 const readonly = { contents: 'read', metadata: 'read', pull_requests: 'read' };
-const limit = 65_536;
+const responseLimits = Object.freeze({ auth: 65_536, publication: 2 * 1024 * 1024 });
 const validCredential = (value) => typeof value === 'string' && /^[\x21-\x7e]{1,8192}$/.test(value);
 const account = (value) => value?.id === 4238205 && value?.login === 'glyad';
 function permissions(value, expected, implicitMetadata = false) {
@@ -53,7 +53,19 @@ const requestPhases = Object.freeze({
 });
 
 // One bounded request, including body reads. No redirects or mutation retries.
-async function request(fetchImpl, method, path, credential, body, expectedStatus) {
+export async function appRequest(
+  fetchImpl,
+  method,
+  path,
+  credential,
+  body,
+  expectedStatus,
+  phase,
+  responseProfile = 'auth',
+) {
+  if (!Object.hasOwn(responseLimits, responseProfile))
+    throw new AuthCheckError('Invalid response profile');
+  const limit = responseLimits[responseProfile];
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10_000);
   let response;
@@ -103,7 +115,7 @@ async function request(fetchImpl, method, path, credential, body, expectedStatus
     kind = 'parse failure';
     return JSON.parse(Buffer.concat(chunks).toString('utf8'));
   } catch {
-    throw new RequestFailure(requestPhases[path], kind, status);
+    throw new RequestFailure(requestPhases[path] ?? phase ?? 'publication', kind, status);
   } finally {
     clearTimeout(timer);
     controller.abort();
@@ -112,13 +124,19 @@ async function request(fetchImpl, method, path, credential, body, expectedStatus
   }
 }
 
-export async function runAuthCheck({
+export async function withReviewerApp({
   privateKey,
   fetchImpl = globalThis.fetch,
   mask = () => {},
   diagnostic = () => {},
   now = Date.now,
+  profile = 'read',
+  operation = async () => null,
 } = {}) {
+  if (!['read', 'publish'].includes(profile))
+    throw new AuthCheckError('Invalid authentication profile');
+  const selected = profile === 'read' ? readonly : granted;
+  let result;
   let jwt;
   let fingerprint;
   try {
@@ -138,7 +156,7 @@ export async function runAuthCheck({
   }
   mask(jwt);
   diagnostic(`Public key fingerprint ${fingerprint}`);
-  const app = await request(fetchImpl, 'GET', '/app', jwt, null, 200);
+  const app = await appRequest(fetchImpl, 'GET', '/app', jwt, null, 200);
   if (
     app?.id !== appId ||
     app?.client_id !== clientId ||
@@ -147,7 +165,7 @@ export async function runAuthCheck({
     !permissions(app?.permissions, granted)
   )
     throw new AuthCheckError('App identity or permissions mismatch');
-  const installation = await request(
+  const installation = await appRequest(
     fetchImpl,
     'GET',
     `/app/installations/${installationId}`,
@@ -171,12 +189,15 @@ export async function runAuthCheck({
   let failure;
   const failures = [];
   try {
-    const issued = await request(
+    const issued = await appRequest(
       fetchImpl,
       'POST',
       `/app/installations/${installationId}/access_tokens`,
       jwt,
-      { repository_ids: [repositoryId], permissions: { contents: 'read', pull_requests: 'read' } },
+      {
+        repository_ids: [repositoryId],
+        permissions: { contents: 'read', pull_requests: selected.pull_requests },
+      },
       201,
     );
     // Capture before validating restrictions so all received usable tokens are revoked.
@@ -185,13 +206,13 @@ export async function runAuthCheck({
     mask(token);
     if (
       issued.repository_selection !== 'selected' ||
-      !permissions(issued.permissions, readonly, true) ||
+      !permissions(issued.permissions, selected, true) ||
       !repositories(issued.repositories) ||
       !Number.isFinite(Date.parse(issued.expires_at)) ||
       Date.parse(issued.expires_at) <= now()
     )
       throw new AuthCheckError('Token restrictions mismatch');
-    const observed = await request(
+    const observed = await appRequest(
       fetchImpl,
       'GET',
       '/installation/repositories',
@@ -201,6 +222,18 @@ export async function runAuthCheck({
     );
     if (observed?.total_count !== 1 || !repositories(observed?.repositories))
       throw new AuthCheckError('Repository readback mismatch');
+    result = await operation((method, path, body = null, status = 200) =>
+      appRequest(
+        fetchImpl,
+        method,
+        path,
+        token,
+        body,
+        status,
+        'publication',
+        profile === 'publish' ? 'publication' : 'auth',
+      ),
+    );
   } catch (error) {
     if (error instanceof RequestFailure) failures.push(error.message);
     // Only fixed local messages escape; never forward fetch/crypto exceptions.
@@ -212,7 +245,7 @@ export async function runAuthCheck({
   } finally {
     if (token) {
       try {
-        await request(fetchImpl, 'DELETE', '/installation/token', token, null, 204);
+        await appRequest(fetchImpl, 'DELETE', '/installation/token', token, null, 204);
       } catch (error) {
         if (error instanceof RequestFailure) failures.push(error.message);
         failure = failure ? `${failure}; token revocation failed` : 'Token revocation failed';
@@ -221,9 +254,19 @@ export async function runAuthCheck({
       failure = 'Token issuance uncertain; no usable token received for revocation';
     }
   }
-  if (failure)
-    throw new AuthCheckError(`${failure}${failures.length ? ` [${failures.join('; ')}]` : ''}`);
-  return { appId, installationId, repositoryId, permissions: readonly, revoked: true };
+  if (failure) {
+    const error = new AuthCheckError(
+      `${failure}${failures.length ? ` [${failures.join('; ')}]` : ''}`,
+    );
+    if (result !== undefined) error.result = result;
+    throw error;
+  }
+  return { appId, installationId, repositoryId, permissions: selected, revoked: true, result };
+}
+
+export async function runAuthCheck(options) {
+  const { result, ...summary } = await withReviewerApp({ ...options, profile: 'read' });
+  return summary;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

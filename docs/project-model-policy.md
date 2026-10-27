@@ -50,3 +50,13 @@ Prefer included Codex usage and eligible resets for app work, subject to authori
 The owner's 2026-10-25–26 direction is to execute the existing approved repository setup through native Project built-ins and ordinary Actions, without another architecture/approval cycle for that setup. Local agent logs, context and checkpoints stay local and are not Actions inputs. External services, custom durability/provenance infrastructure, dormant controller activation and approval of the discarded amendment are not prerequisites for these ordinary flows. Earlier formal product documents and historical implementations remain preserved; this clarification does not amend product scope or create a blanket future waiver.
 
 Normal GitHub PR reviews use a separate user/App, exclude Copilot, and await the owner-postponed reviewer identity/setup decision until the remaining setup is ready. The earlier custom Codex Action selection is not a current setup prerequisite. Do not ask prematurely for API keys/funding or infer paid-use authorization. All activity model/effort assignments, separate self-review and independent-review roles, branching/checks and actual access/protection boundaries remain unchanged; no model substitution, credential grant or reviewer activation follows from this clarification. See the [current operating direction](project-instructions.md#current-native-setup-direction).
+
+Latest owner selection, 2026-10-27: use fresh local Codex GPT-6 Astra/High
+independent reviewers under included allowance, with actual model/effort selection
+in the invocation; retain separate Sol/High self-review. The existing
+`glyad-workspace-reviewer` App is the native publishing persona. This replaces the
+postponed identity/paid-reviewer setup direction above for current ordinary setup.
+The [local handoff](governance/reviewer-app-publish.md) carries only bounded public
+review text/target metadata; full local context stays private. Publication cannot
+prove model authorship. Manual publication does not install the later local app
+heartbeat or establish its end-to-end acceptance. No paid API fallback is authorized.
