@@ -174,3 +174,13 @@ Owner clarification, 2026-10-25–26: execute the existing approved repository s
 Earlier dormant controllers, protocol implementations and their evidence remain preserved and unactivated; their historical contracts are not mandatory for the new ordinary native flows. Earlier statements that all Actions are disabled describe their recorded checkpoint, not the later verified ordinary CI state. Consult the current setup ledger and native runbooks for actual source delivery, access and live-acceptance status; do not infer that setup is complete.
 
 Normal GitHub PR reviews use a separate user/App, with no Copilot. The owner postponed reviewer identity/setup until the remaining setup is ready; do not ask prematurely for keys or funding, enable a paid reviewer, or incur automatic API charges. This direction supersedes the earlier custom Codex review mechanism as a setup prerequisite; it does not choose an identity, grant access or activate review. Formal approved product documents, assigned model/reasoning roles, branching, signed commits, local checks, exact-candidate independent review and current permission/protection boundaries remain in force.
+
+Owner selection, 2026-10-27: fresh local Codex Astra/High independent reviews use
+included allowance and the existing `glyad-workspace-reviewer` App publishes native
+reviews/inline replies. This supersedes the postponed identity and earlier paid
+reviewer mechanism for the current setup. Sol/High self-review remains separate;
+exact current Ready CI/base/head and all ordinary checks/protections remain required.
+See the [local handoff runbook](governance/reviewer-app-publish.md). The manual
+publisher is not automatic model startup; local heartbeat installation and live
+review/reply acceptance remain separate operational steps. No paid calls, new
+App, local private key or dormant-controller activation is selected.

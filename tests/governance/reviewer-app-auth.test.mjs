@@ -2,7 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, verify } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { runAuthCheck, safeAuthError } from '../../tools/governance/reviewer-app-auth.mjs';
+import {
+  runAuthCheck,
+  withReviewerApp,
+  safeAuthError,
+  appRequest,
+} from '../../tools/governance/reviewer-app-auth.mjs';
 
 const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
 const pem = privateKey.export({ type: 'pkcs8', format: 'pem' });
@@ -14,7 +19,7 @@ const repo = {
   owner: { id: 4238205, login: 'glyad' },
 };
 const token = 'future-format.' + 'a'.repeat(170);
-function fixture(change = () => {}) {
+function fixture(change = () => {}, options = {}) {
   const values = [
     {
       id: 5487224,
@@ -60,7 +65,8 @@ function fixture(change = () => {}) {
     masks,
     diagnostics,
     run: () =>
-      runAuthCheck({
+      (options.profile ? withReviewerApp : runAuthCheck)({
+        ...options,
         privateKey: pem,
         now: () => Date.parse('2026-10-27T00:00:00Z'),
         fetchImpl,
@@ -506,4 +512,66 @@ test('key rotation changes public diagnostic without a source pin', async () => 
   );
   for (const credential of [rotatedPem, pem, token, ...masks])
     assert.ok(!diagnostics.join('').includes(credential));
+});
+
+test('write profile reuses pinned auth and revokes even when operation fails', async () => {
+  let called = false;
+  const f = fixture(
+    (values) => {
+      values[2].permissions = granted;
+    },
+    {
+      profile: 'publish',
+      operation: async () => {
+        called = true;
+        throw Error('raw sensitive callback');
+      },
+    },
+  );
+  await assert.rejects(f.run(), /Installation read failed/);
+  assert.equal(called, true);
+  assert.equal(JSON.parse(f.calls[2].body).permissions.pull_requests, 'write');
+  assert.equal(f.calls.at(-1).method, 'DELETE');
+});
+test('publication result survives cleanup failure without a duplicate operation', async () => {
+  const receipt = { state: 'verified', nativeId: 88 };
+  const f = fixture(
+    (values) => {
+      values[2].permissions = granted;
+      values[4] = 500;
+    },
+    { profile: 'publish', operation: async () => receipt },
+  );
+  await assert.rejects(
+    f.run(),
+    (error) => error.result === receipt && safeAuthError(error).includes('Token revocation failed'),
+  );
+  assert.equal(f.calls.filter((c) => c.method === 'DELETE').length, 1);
+});
+
+test('fixed publication response profile remains bounded and rejects arbitrary response profiles', async () => {
+  let calls = 0;
+  const fetchImpl = async () => {
+    calls++;
+    return Response.json({ text: 'x'.repeat(2 * 1024 * 1024) });
+  };
+  await assert.rejects(
+    appRequest(
+      fetchImpl,
+      'GET',
+      '/repos/glyad/github-workspace-manager/compare/a...b',
+      'synthetic-token',
+      null,
+      200,
+      'publication',
+      'publication',
+    ),
+    (error) => safeAuthError(error) === 'publication: response limit exceeded (HTTP 200)',
+  );
+  assert.equal(calls, 1);
+  await assert.rejects(
+    appRequest(fetchImpl, 'GET', '/app', 'synthetic-token', null, 200, 'publication', 'unbounded'),
+    /Invalid response profile/,
+  );
+  assert.equal(calls, 1);
 });
