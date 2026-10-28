@@ -13,12 +13,29 @@
 
 ## Current native operations
 
-Dated pointer, 2026-10-27: native Ready CI, Draft control, Project sync and the App
-publisher are installed; the local Codex reviewer heartbeat is ACTIVE every 10
-minutes. The [publisher operational handoff](reviewer-app-publish.md) records
-installed versus live-accepted status, written PR discussion and recovery. First
-genuine reviewer acceptance and some hosted scenarios remain pending; Task 11 is
-partial and Tasks 9–10 still require product build/E2E and release evidence.
+Current handoff, 2026-10-28: native Ready CI, Draft control, Project sync and the App
+publisher are installed. The owner deleted reviewer scheduling. Reviews run on
+demand at actual work checkpoints after current successful Ready CI using fresh
+independent local Astra/High, included allowance and existing App reviews/replies;
+Sol/High self-review remains separate. The [publisher handoff](reviewer-app-publish.md)
+records genuine PR63/65 approvals/revocation, written discussion and recovery.
+Inline/reply/fix behavior awaits genuine future product work without manufactured
+findings/test PRs or idle polling. Some hosted scenarios remain unobserved.
+
+Release packaging/publication is postponed until first delivery, not a prerequisite
+for beginning product development. Historical formal specs/plans and product scope
+remain preserved. Bounded protection exceptions are authorized only through the
+end of GitHub setup. Before product development, restore and read back all selected
+branch safeguards and remove temporary bypasses; unverified restoration blocks
+that transition, and no standing product bypass follows.
+
+The final intended native develop safeguards are signed commits, nonforce and
+nondelete rules, PR merge-only integration with resolved conversations, and real
+current CI checks pinned to the GitHub Actions issuer with strict up-to-date parent
+checks. The nativeCIgate transition is **pending actual verified configuration and
+readback**. Independent exact-pair App review stays procedural; native GitHub does
+not enforce the chosen model identity or prove exact-base review. Do not report
+setup complete from this intended configuration alone.
 
 The remaining sections are the **historical baseline procedure**. Their inactive
 activation configuration and setup-session protocol retain that earlier contract;

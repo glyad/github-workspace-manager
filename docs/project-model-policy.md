@@ -29,7 +29,7 @@ For document rendering, format conversion and output-layout work, use GPT-6.1 So
 
 Apply the selected activity's assignment when dispatching its work. Do not silently substitute another model or effort if an assignment is unavailable; report the limitation. The user explicitly assigned fresh Astra/High independent code review and fix rechecks, separate from Sol/High implementation self-review. Apply that independent code-review role to task/PR and whole-branch code reviews; its assignment does not derive from the architecture-review row. Preserve any additional independent review stages required by the applicable Superpowers workflow.
 
-Automatic GitHub review when a draft PR becomes ready is selected. Pin independent review evidence to the exact base/head commits and recheck fixes; a changed base or head requires a new review. The current mechanism is fresh local included-allowance review plus the existing App publisher and installed local heartbeat, as described below; the earlier paid custom Codex Action selection is superseded and remains unactivated. `glyad` remains the owner principal. The 2026-10-23 standing delegation permits agents to merge reviewed PRs and delete only eligible remote head branches after verified parent integration, with routing, signatures, fresh synchronization, exact base/head checks/review and applicable protection gates preserved. Direct normal-release develop→main authority remains with glyad; this grants no standing bypass, protection change or activation. Model selection does not itself authorize API charges or create a second GitHub approver.
+Owner amendment, 2026-10-28: independent review runs on demand at actual work checkpoints after current successful Ready CI. The owner deleted reviewer scheduling; no replacement scheduler or idle polling is selected. Pin independent review evidence to the exact base/head commits and recheck fixes; a changed base or head requires a new review. The current mechanism is fresh local included-allowance review plus the existing App publisher for reviews/replies, as described below; the earlier paid custom Codex Action selection is superseded and remains unactivated. `glyad` remains the owner principal. The 2026-10-23 standing delegation permits agents to merge reviewed PRs and delete only eligible remote head branches after verified parent integration, with routing, signatures, fresh synchronization, exact base/head checks/review and applicable protection gates preserved. Direct normal-release develop→main authority remains with glyad; this grants no standing bypass, protection change or activation. Model selection does not itself authorize API charges or create a second GitHub approver.
 
 This policy governs future work; it does not claim that earlier documents were created with these settings. Earlier architecture drafting used Astra/Medium at the user's then-current request, and the user subsequently approved that architecture. Do not redo approved documents merely to apply this policy retroactively.
 
@@ -58,13 +58,22 @@ in the invocation; retain separate Sol/High self-review. The existing
 postponed identity/paid-reviewer setup direction above for current ordinary setup.
 The [local handoff](governance/reviewer-app-publish.md) carries only bounded public
 review text/target metadata; full local context stays private. Publication cannot
-prove model authorship. The local heartbeat `github-workspace-reviewer` is installed
-ACTIVE every 10 minutes at the recorded 2026-10-27 checkpoint; source and manual
-publication do not install it or prove end-to-end acceptance. Host sleep/offline,
-allowance exhaustion or unavailable fresh invocation pauses review. No paid API
-fallback is authorized. Developer dispositions and reviewer written rechecks belong
+prove model authorship or exact-base review through native GitHub enforcement.
+The 2026-10-28 owner amendment deletes reviewer scheduling in favor of on-demand
+reviews at actual work checkpoints after current successful Ready CI. Genuine App
+approvals and token revocation were observed for PR63/65; inline/reply/fix behavior
+awaits genuine future product work without manufactured findings or test PRs.
+Host sleep/offline, allowance exhaustion or unavailable fresh invocation pauses
+review. No paid API fallback is authorized. Developer dispositions and reviewer written rechecks belong
 in each actual native finding thread under the [canonical protocol](governance/reviewer-app-publish.md#written-pr-discussion-protocol).
 Private chat alone is insufficient; Draft replies are discussion only, and approval
 or fix acceptance needs fresh Astra/High review after current successful Ready CI
 on the exact current base/head. Publication/replies do not automatically resolve
 conversations or grant integration authority.
+
+Release packaging/publication is postponed until first delivery, not required to
+begin product development. Restore and read back branch safeguards before that
+transition; bounded setup exceptions expire at the end of GitHub setup and confer
+no standing product bypass. See the [current setup handoff](governance/setup-runbook.md#current-native-operations)
+for the pending nativeCIgate transition; historical formal specs/plans and baseline
+verifier contracts remain preserved.
