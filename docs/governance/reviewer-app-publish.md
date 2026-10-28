@@ -33,16 +33,19 @@ Installed-state observation, 2026-10-27: Ready CI, [Draft controls](pr-draft.md)
 required branches and active. [PR62](https://github.com/glyad/github-workspace-manager/pull/62)
 delivered the publisher to develop `a416afdf057911635a6931521bcda3a47982f859`
 and main `faec5ba5120ad1a0ef0211fd704a75335be3778e`; workflow 398438778 is active.
-The local Codex heartbeat `github-workspace-reviewer` is ACTIVE every 10 minutes.
-This is local app configuration, not installed by repository source. Each actionable
-review cycle reconciles pending items and observes Ready/current successful CI and
-changed discussion, then invokes a fresh Astra/High reviewer through an available
-local agent mechanism with model/effort explicitly selected in the invocation. The host
-must be awake and connected with included allowance and fresh Astra/High invocation
-available. Stay quiet on unchanged or non-actionable state; report meaningful
-publication, failure or required user action. The latest ledger checkpoint had
-no open PRs, so no live review was available to perform. Installation and scheduler
-state do not establish end-to-end review acceptance or a permanent runtime guarantee.
+
+Current owner amendment, 2026-10-28: reviewer scheduling was deleted. Reviews run
+on demand at actual work checkpoints after current successful Ready CI, using a
+fresh independent local Astra/High invocation with model/effort explicitly selected.
+Reconcile pending items and observe the exact current pair and discussion before
+invoking or publishing. Use existing App reviews/replies and included allowance;
+do not create another scheduler or poll while idle. The host must be awake and
+connected with allowance and fresh Astra/High invocation available. The earlier
+2026-10-27 ACTIVE heartbeat observation is historical, not current configuration.
+Genuine approvals and token revocation were observed for
+[PR63](https://github.com/glyad/github-workspace-manager/pull/63) and
+[PR65](https://github.com/glyad/github-workspace-manager/pull/65). This establishes
+those observations, not a permanent runtime guarantee or native model enforcement.
 
 ## Written PR discussion protocol
 
@@ -212,17 +215,20 @@ Do not broaden App permissions or reuse consumed setup bypass exceptions to reco
 
 ## Acceptance still required
 
-The first genuine Ready+current successful CI → fresh independent Astra/High
-invocation → native App review/readback and confirmed revocation remains pending
-at the 2026-10-27 checkpoint. Inline finding/reply/fix recheck acceptance is pending
-until genuine findings exist; do not manufacture a review, finding or approval
-solely to test publishing. Mocked tests and an ACTIVE heartbeat do not prove this
-chain. [Issue 32](https://github.com/glyad/github-workspace-manager/issues/32) tracks
-reviewer acceptance.
+Genuine fresh independent review, native App approvals and token revocation were
+observed for PR63/65. Inline finding/reply/fix behavior remains to observe when
+actual product findings arise. Do not manufacture findings, approvals or test PRs,
+or poll while idle to complete that observation. Preserve existing native finding
+threads and written recheck procedures for genuine work.
+[Issue 32](https://github.com/glyad/github-workspace-manager/issues/32) retains the
+reviewer acceptance history; these observations do not claim every path exercised.
 
-This documentation increment is partial Task 11 operational handoff under
-[Issue 36](https://github.com/glyad/github-workspace-manager/issues/36), which remains
-open for broader activation/verifier/release obligations. Some hosted Draft and
-Project scenarios remain unobserved in their runbooks. Tasks 9–10 still need actual
-product build/E2E and release evidence. The historical baseline verifier retains
-its disabled-automation contract; see the [setup boundary](setup-runbook.md#current-native-operations).
+The broader setup handoff under
+[Issue 36](https://github.com/glyad/github-workspace-manager/issues/36) remains
+subject to actual branch-safeguard restoration/readback. Some hosted Draft and
+Project scenarios remain unobserved in their runbooks. Actual product build/E2E
+and release evidence belong to product development and delivery. The owner postponed
+release packaging/publication until first delivery; it does not block starting
+product development once setup safeguards are verified. The historical baseline
+verifier retains its disabled-automation contract; see the
+[setup boundary](setup-runbook.md#current-native-operations).
