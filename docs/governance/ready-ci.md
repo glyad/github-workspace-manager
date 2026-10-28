@@ -36,9 +36,23 @@ A maintainer/agent must still return failed or changed candidates to Draft and v
 that transition before editing. Deliberately mark the updated Draft ready only after
 local checks; neither a retry nor an old success authorizes a new review.
 
-The [App publisher and local heartbeat](reviewer-app-publish.md) are installed for
-fresh local included-allowance Astra/High review through a separate native App persona.
-Full live reviewer acceptance remains pending. This CI workflow itself submits no
-review, updates no Project and merges no PR. It calls no paid review API and uses no
-external state service or local agent context. Existing dormant workflows and historical
-evidence are retained.
+The [App publisher](reviewer-app-publish.md) supports fresh local included-allowance
+Astra/High review through a separate native App persona. The owner deleted reviewer
+scheduling on 2026-10-28; invoke reviews on demand at actual work checkpoints after
+current successful Ready CI. Genuine App approvals and token revocation were
+observed for PR63/65; inline/reply/fix behavior awaits genuine product findings,
+without manufactured test PRs or idle polling. Sol/High self-review stays separate.
+
+The intended native develop CI gate requires real current CI checks pinned to the
+GitHub Actions issuer and strict up-to-date parent enforcement alongside signatures,
+nonforce/nondelete rules, PR merge-only integration and resolved conversations.
+The nativeCIgate transition remains pending actual verified configuration/readback;
+restore and verify branch safeguards before product development. Exact-pair App
+review remains procedural; native GitHub rules do not enforce model identity or
+prove exact-base review. Release packaging/publication is deferred to first delivery
+and does not block starting product development after safeguard verification.
+
+This CI workflow itself submits no review, updates no Project and merges no PR.
+It calls no paid review API and uses no external state service or local agent
+context. Existing dormant workflows, historical evidence and baseline verifier
+contracts are retained.
