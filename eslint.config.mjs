@@ -1,6 +1,11 @@
 export default [
   {
-    files: ['tools/governance/**/*.mjs', 'tests/governance/**/*.mjs', 'eslint.config.mjs'],
+    files: [
+      'tools/governance/**/*.mjs',
+      'tests/governance/**/*.mjs',
+      'eslint.config.mjs',
+      'scripts/**/*.mjs',
+    ],
     languageOptions: { ecmaVersion: 2025, sourceType: 'module' },
     rules: {
       'no-unreachable': 'error',
