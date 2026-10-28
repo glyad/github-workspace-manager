@@ -3,8 +3,10 @@
 ## Contents
 
 - [Operating scope](#operating-scope)
+- [Written PR discussion protocol](#written-pr-discussion-protocol)
 - [Prepare and dispatch](#prepare-and-dispatch)
 - [Publication and recovery](#publication-and-recovery)
+- [Operator recovery checklist](#operator-recovery-checklist)
 - [Acceptance still required](#acceptance-still-required)
 
 ## Operating scope
@@ -25,6 +27,43 @@ The workflow's separate read-only `GITHUB_TOKEN` has `actions: read` for CI/run
 observations. No App Actions grant, model API, provider proxy, local PEM,
 external service, PR checkout, dependency installation or dormant controller is needed.
 The [read-only authentication check](reviewer-app-auth.md) retains its own contract.
+
+Installed-state observation, 2026-10-27: Ready CI, [Draft controls](pr-draft.md),
+[Project sync](native-project-sync.md) and this publisher are delivered on the
+required branches and active. [PR62](https://github.com/glyad/github-workspace-manager/pull/62)
+delivered the publisher to develop `a416afdf057911635a6931521bcda3a47982f859`
+and main `faec5ba5120ad1a0ef0211fd704a75335be3778e`; workflow 398438778 is active.
+The local Codex heartbeat `github-workspace-reviewer` is ACTIVE every 10 minutes.
+This is local app configuration, not installed by repository source. Each actionable
+review cycle reconciles pending items and observes Ready/current successful CI and
+changed discussion, then invokes a fresh Astra/High reviewer through an available
+local agent mechanism with model/effort explicitly selected in the invocation. The host
+must be awake and connected with included allowance and fresh Astra/High invocation
+available. Stay quiet on unchanged or non-actionable state; report meaningful
+publication, failure or required user action. The latest ledger checkpoint had
+no open PRs, so no live review was available to perform. Installation and scheduler
+state do not establish end-to-end review acceptance or a permanent runtime guarantee.
+
+## Written PR discussion protocol
+
+For each actual finding, the developer must respond in that native PR finding
+thread with a concrete disposition: the fix and commit/evidence, a reasoned
+disagreement, or an explicitly unresolved/blocking question. Private chat alone
+is insufficient; written native discussion lets humans participate. Do not create
+synthetic findings to exercise the protocol.
+
+The reviewer reads the developer and human discussion and posts its written
+recheck/disposition in the same native thread, leaving disagreements visible.
+A reply while Draft is discussion only. Approval or fix acceptance requires a
+fresh independent **Astra/High** invocation after successful current Ready CI,
+with the exact current base/head revalidated. A changed base or head invalidates
+previous review evidence. Sol/High implementation self-review remains separate.
+A genuine complete review may approve with no inline comments.
+
+Neither a written reply nor App publication automatically resolves a conversation
+or grants integration authority. Unresolved conversations and stale evidence
+continue to block integration under existing merge/protection rules. Follow the
+[review and merge policy](../project-instructions.md#independent-review-and-merge-authority).
 
 ## Prepare and dispatch
 
@@ -142,20 +181,48 @@ reads a transient change can evade observation. Do not count stale evidence for
 current integration, promise exactly-once delivery, or infer branch-protection
 review-count behavior from the bot's native review alone.
 
+## Operator recovery checklist
+
+- **Host sleep/offline or allowance/model unavailable:** pause review and retain
+  private prepared/pending files. On recovery, inspect native PR/discussion/CI
+  state and existing pending items before invoking a fresh reviewer or dispatching.
+  No paid fallback, credential copying or automatic Ready restoration is allowed.
+- **Changed pair or return to Draft:** keep old evidence stale and reconcile
+  pending publication. Follow the existing Draft and parent-synchronization policy,
+  then local checks, deliberate Ready, current successful CI and fresh independent
+  review before preparing a new review operation. Draft thread replies remain
+  discussion only.
+- **Failed CI:** verify Draft state using the Draft-control runbook; reconcile a
+  failed/manual control result. Fix while Draft, validate, then deliberately Ready.
+  An old success or retry does not grant review authority for a new candidate.
+- **Project/manual outcome:** inspect current Issue links, acceptance, Project
+  Status, closure and workflow outcome using the Project runbook before a
+  deliberate retry. Preserve partial writes and unresolved owner decisions;
+  never count a metadata update as delivery.
+- **Publication or revocation uncertain:** inspect the retained operation, workflow
+  run/receipt and native review/thread before retrying. Use existing `prepare`,
+  `send` and `resume` commands above; `resume` observes and reconciles. A failed run
+  may already have published. Unknown absence or cleanup remains uncertain; do not
+  blindly duplicate dispatch, discard pending state or infer revocation. A stale
+  operation requires fresh evidence and a new operation ID, after reconciliation.
+
+Keep logs, local context, snapshots and secrets private. Only bounded intended
+public text and target metadata belong in publication payloads or repository docs.
+Do not broaden App permissions or reuse consumed setup bypass exceptions to recover.
+
 ## Acceptance still required
 
-Mocked tests establish local behavior only. After reviewed trusted-main delivery,
-observe one genuine independent review with an inline thread, native App author,
-exact anchors/pair/event, successful revocation, then a fix/thread reply recheck.
-Do not manufacture an approval solely to test publishing.
+The first genuine Ready+current successful CI → fresh independent Astra/High
+invocation → native App review/readback and confirmed revocation remains pending
+at the 2026-10-27 checkpoint. Inline finding/reply/fix recheck acceptance is pending
+until genuine findings exist; do not manufacture a review, finding or approval
+solely to test publishing. Mocked tests and an ACTIVE heartbeat do not prove this
+chain. [Issue 32](https://github.com/glyad/github-workspace-manager/issues/32) tracks
+reviewer acceptance.
 
-Automatic start is a separate next operational step: install a real local Codex
-app heartbeat in the repository chat, with bounded cadence and a prompt that
-reconciles pending items and discovers Ready/current successful CI and changed
-discussion. It must invoke a fresh **Astra/High** reviewer through an available
-local agent mechanism with model/effort in the invocation. Stay quiet when nothing
-requires action; report publication, failure or required user action. Observe a
-real Ready+CI transition, reviewer invocation, App publication and fix/thread
-recheck before claiming automation accepted. No heartbeat is installed by these
-files. Offline host, sleep, allowance exhaustion or unavailable fresh-model
-invocation pauses review without a paid API fallback.
+This documentation increment is partial Task 11 operational handoff under
+[Issue 36](https://github.com/glyad/github-workspace-manager/issues/36), which remains
+open for broader activation/verifier/release obligations. Some hosted Draft and
+Project scenarios remain unobserved in their runbooks. Tasks 9–10 still need actual
+product build/E2E and release evidence. The historical baseline verifier retains
+its disabled-automation contract; see the [setup boundary](setup-runbook.md#current-native-operations).
