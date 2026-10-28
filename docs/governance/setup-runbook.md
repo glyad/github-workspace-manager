@@ -2,6 +2,7 @@
 
 ## Table of contents
 
+- [Current native operations](#current-native-operations)
 - [Authority and current state](#authority-and-current-state)
 - [Read-only preflight](#read-only-preflight)
 - [Bounded setup session](#bounded-setup-session)
@@ -9,6 +10,22 @@
 - [Evidence identity](#evidence-identity)
 - [Verification and remaining gates](#verification-and-remaining-gates)
 - [Final protection handoff](#final-protection-handoff)
+
+## Current native operations
+
+Dated pointer, 2026-10-27: native Ready CI, Draft control, Project sync and the App
+publisher are installed; the local Codex reviewer heartbeat is ACTIVE every 10
+minutes. The [publisher operational handoff](reviewer-app-publish.md) records
+installed versus live-accepted status, written PR discussion and recovery. First
+genuine reviewer acceptance and some hosted scenarios remain pending; Task 11 is
+partial and Tasks 9–10 still require product build/E2E and release evidence.
+
+The remaining sections are the **historical baseline procedure**. Their inactive
+activation configuration and setup-session protocol retain that earlier contract;
+they do not describe current native activation. `tools/governance/verify-baseline.mjs`
+intentionally verifies the earlier disabled-automation baseline, all-inactive
+configuration and baseline ancestry. It is not a current native-activation verifier.
+Do not weaken it or reuse consumed installation exceptions as new bypass authority.
 
 ## Authority and current state
 

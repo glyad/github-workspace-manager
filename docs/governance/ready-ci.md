@@ -22,8 +22,23 @@ The final observation uses an independent runner to avoid candidate changes to t
 
 ## Operation and pending setup
 
-Actions activation, delivery to the required repository branches (including default branch), hosted success/failure/retry verification, and any required-check/protection configuration remain pending. This source addition performs no live activation or settings change. GitHub also applies its normal fork-run approval and merge-conflict limitations for `pull_request` workflows; see [event documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request) and [token permissions](https://docs.github.com/en/actions/tutorials/authenticate-with-github_token).
+Recorded 2026-10-27 state: Ready CI is delivered and active on the required branches,
+including default main. Actual Linux checks and the final candidate job succeeded,
+including [PR62 run 40533644509](https://github.com/glyad/github-workspace-manager/actions/runs/40533644509).
+This historical success does not validate a later candidate or establish required-check
+configuration. GitHub applies normal fork-run approval and merge-conflict limitations;
+see [event documentation](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request)
+and [token permissions](https://docs.github.com/en/actions/tutorials/authenticate-with-github_token).
 
-Automatic failure→Draft and push→Draft controls are still pending. Until delivered, a maintainer/agent must return failed or changed review candidates to Draft and verify the transition before continuing edits. Deliberately mark the updated Draft ready only after local checks; neither a retry nor an old success authorizes a new review.
+[Failure/push→Draft controls](pr-draft.md) and [native Project sync](native-project-sync.md)
+are installed and active; their remaining live scenarios are listed in those runbooks.
+A maintainer/agent must still return failed or changed candidates to Draft and verify
+that transition before editing. Deliberately mark the updated Draft ready only after
+local checks; neither a retry nor an old success authorizes a new review.
 
-Native Project intake is configured separately; the Project lifecycle Action for evidence-based status updates remains pending. Independent reviewer identity, credentials and review automation are also pending: submit normal GitHub PR reviews through a separate user or App, never Copilot. This workflow does not submit a review, update the Project, merge a PR, or call a paid review API. Actions uses no external state service and no local agent checkpoint/context files. Existing dormant workflows and historical evidence are retained.
+The [App publisher and local heartbeat](reviewer-app-publish.md) are installed for
+fresh local included-allowance Astra/High review through a separate native App persona.
+Full live reviewer acceptance remains pending. This CI workflow itself submits no
+review, updates no Project and merges no PR. It calls no paid review API and uses no
+external state service or local agent context. Existing dormant workflows and historical
+evidence are retained.
