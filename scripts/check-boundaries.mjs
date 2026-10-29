@@ -55,13 +55,18 @@ export async function checkBoundaries(root = process.cwd()) {
         const inside = target.startsWith(`packages/${layer}/src/`);
         const allowedExternal =
           layer === 'domain' && /^@noble\/hashes\/(sha2|utils)\.js$/.test(source);
-        const allowedApplication = layer === 'application' && targetLayer === 'domain';
+        const allowedApplication =
+          ['application', 'components'].includes(layer) && targetLayer === 'domain';
+        const allowedBundledAsset =
+          layer === 'components' &&
+          /^packages\/components\/assets\/(licenses|gitignore)\.json$/.test(target);
         if (
           testImport ||
-          ((layer === 'domain' || layer === 'application') &&
+          (['domain', 'application', 'components'].includes(layer) &&
             !inside &&
             !allowedExternal &&
-            !allowedApplication)
+            !allowedApplication &&
+            !allowedBundledAsset)
         )
           errors.push(`${path}: forbidden import ${source}`);
       }
