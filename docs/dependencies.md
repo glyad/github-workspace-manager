@@ -7,6 +7,7 @@ Verified 2026-10-28 against the official npm registry. Exact direct versions and
 - [Selected packages](#selected-packages)
 - [Runtime and dependency boundaries](#runtime-and-dependency-boundaries)
 - [Configuration parser](#configuration-parser)
+- [Bundled component assets](#bundled-component-assets)
 - [Deferred packages](#deferred-packages)
 
 ## Selected packages
@@ -38,6 +39,23 @@ The [official YAML 2 documentation](https://eemeli.org/yaml/) establishes `parse
 The parser accepts one YAML 1.2 core document, at most 256 KiB of UTF-8, 10,000 nodes and depth 32. It rejects aliases entirely before expansion, duplicate keys, merge keys, non-string mapping keys, unknown/custom tags, non-finite numbers and prototype-shaped keys. These are parser safety bounds, not invented retention defaults. Source paths are relative repository file paths with no traversal, absolute paths or backslashes. Source authority/trust is injected metadata, and document attempts to provide it fail `UNTRUSTED_POLICY`. The committed reader requires the injected port's returned revision to equal the pinned revision; runtime's actual ref-to-revision binding remains Task 23's responsibility.
 
 GitHub restrictions in the current `Record<FieldPath, Json>` interface represent exact required values. They constrain managed intent without making omitted fields managed. Trusted organization-enforced intents override advisory/profile recommendations; explicit repository choices conflicting with an enforced intent fail. Equal-rank conflicts fail rather than depending on input order. Component-specific field ownership/semantics belong to Task 3's registry; this envelope rejects unknown structural/intent members and execution preferences without pretending that future component schemas already exist.
+
+## Bundled component assets
+
+Task 3 adds no external package dependency. The components workspace depends only on domain; the boundary checker permits its own source, domain contracts and the two named bundled JSON data files, and rejects Node, provider, application and runtime imports. JSON imports use the pinned Node/TypeScript import-attributes syntax; no JSON loader or filesystem reads enter the components layer.
+
+The supported bundled choices are **MIT** and **Node**, each available only when explicitly selected. These do not select a license or ignore policy for a managed repository. Explicit supplied license/ignore content supports other user-selected text without inventing another bundled catalog. README, issue templates and PR templates freeze supplied text; no model call, framework scaffold or CI generator is introduced.
+
+| Data                 | Immutable official source                                                                                                                                                | Attribution / verification                                                                                                                                                                                                |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MIT license text     | [GitHub choosealicense.com `_licenses/mit.txt` at a7d6915](https://github.com/github/choosealicense.com/blob/a7d691541df6925f4a6081b8e59e7c1fbd3412c2/_licenses/mit.txt) | GitHub and contributors; [site content CC BY 3.0](https://choosealicense.com/about/). Metadata/front matter excluded; legal text preserved. Only explicitly supplied year and holder replace the documented placeholders. |
+| Node ignore template | [GitHub gitignore `Node.gitignore` at 0e5d690](https://github.com/github/gitignore/blob/0e5d690153ca3da8a4a1aef2d053406f408f531c/Node.gitignore)                         | GitHub gitignore contributors; [CC0 1.0 Universal](https://github.com/github/gitignore/blob/0e5d690153ca3da8a4a1aef2d053406f408f531c/LICENSE). Full template copied unchanged.                                            |
+
+Verified by reading the official sources and immutable revisions on 2026-10-29. Each bundled JSON entry records its source, attribution and SHA-256 of the raw UTF-8 template. Rendering verifies that hash before substitution; tests pin the selected MIT output and unchanged Node output digests independently. Every stored artifact must report the exact raw-byte digest, length and media type, and retrieve matching bytes before `renderAssets` returns it. Artifact hashing is distinct from canonical semantic JSON hashing.
+
+Recipes validate all paths, text and destination collisions before persistence. Fixed asset resets mean explicit deletion; issue-template removals require individually named paths. Omitted/unmanaged files and extra supplied prose do not acquire management. Portable issue-template basenames are restricted to `.github/ISSUE_TEMPLATE/` with markdown/YAML extensions; config.yml is outside this component's template-file ownership. Later Git/path adapters still enforce actual destination containment, symlink and repository delivery rules.
+
+Component schemas own flat semantic fields within the existing configuration envelope. `workflow.*` owns desired merge/review/signing behavior; `rulesets.targets` and `rulesets.enforcement` request remote mappings without duplicating desired values or claiming a provider capability. Task 4 owns workflow compatibility, discovery and migration resolution; provider enforcement remains in its approved later tasks. Delivery/storage/retention preferences remain in the separate execution contract, with no invented defaults.
 
 ## Deferred packages
 
