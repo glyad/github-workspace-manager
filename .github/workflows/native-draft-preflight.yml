@@ -1,0 +1,263 @@
+name: Native Draft preflight
+run-name: draft-preflight|pr=${{ inputs.pr_number }}|base=${{ inputs.expected_base }}|head=${{ inputs.expected_head }}|request=${{ inputs.request_id }}
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Existing same-repository Draft correction PR number
+        required: true
+        type: string
+      expected_base:
+        description: Exact current develop SHA
+        required: true
+        type: string
+      expected_head:
+        description: Exact pushed candidate head SHA
+        required: true
+        type: string
+      request_id:
+        description: Unique request ID; never reuse or rerun a request
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      head: ${{ steps.candidate.outputs.head }}
+      tuple: ${{ steps.candidate.outputs.tuple }}
+    steps:
+      - name: Validate trusted dispatch and current Draft candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUTS: ${{ toJSON(inputs) }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          PHASE: prepare
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          // BEGIN TRUSTED VALIDATOR
+          import { appendFileSync } from 'node:fs';
+          const env = process.env;
+          const fail = (message) => { throw new Error(message); };
+          const requireThat = (value, message) => { if (!value) fail(message); };
+          const repo = 'glyad/github-workspace-manager';
+          const repoId = 1427426748;
+          const path = '.github/workflows/native-draft-preflight.yml';
+          const inputs = JSON.parse(env.INPUTS);
+          requireThat(Object.keys(inputs).sort().join(',') === 'expected_base,expected_head,pr_number,request_id', 'Unexpected inputs');
+          requireThat(/^[1-9][0-9]{0,8}$/.test(inputs.pr_number), 'Invalid PR number');
+          for (const key of ['expected_base', 'expected_head']) requireThat(/^[0-9a-f]{40}$/.test(inputs[key]), 'Invalid SHA');
+          requireThat(/^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/.test(inputs.request_id), 'Invalid request ID');
+          requireThat(env.GITHUB_REPOSITORY === repo && env.GITHUB_REPOSITORY_ID === String(repoId), 'Repository mismatch');
+          requireThat(env.GITHUB_EVENT_NAME === 'workflow_dispatch' && env.GITHUB_REF === 'refs/heads/main', 'Dispatch must use main');
+          requireThat(env.GITHUB_ACTOR === 'glyad' && env.GITHUB_TRIGGERING_ACTOR === 'glyad', 'Unauthorized actor');
+          requireThat(env.GITHUB_RUN_ATTEMPT === '1', 'Reruns require a fresh request');
+          requireThat(/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID), 'Invalid run ID');
+          requireThat(/^[0-9a-f]{40}$/.test(env.GITHUB_SHA) && env.WORKFLOW_SHA === env.GITHUB_SHA, 'Untrusted workflow source');
+          requireThat(env.WORKFLOW_REF === `${repo}/${path}@refs/heads/main`, 'Wrong workflow ref');
+          requireThat(['prepare', 'current'].includes(env.PHASE), 'Invalid phase');
+          if (env.PHASE === 'current') requireThat(env.PREPARE_RESULT === 'success' && env.CHECKS_RESULT === 'success', 'Actual prepare and checks jobs must succeed');
+          const api = async (endpoint, body) => {
+            const response = await fetch(`https://api.github.com${endpoint}`, {
+              method: body ? 'POST' : 'GET',
+              headers: { authorization: `Bearer ${env.GH_TOKEN}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', ...(body ? { 'content-type': 'application/json' } : {}) },
+              ...(body ? { body: JSON.stringify(body) } : {}),
+            });
+            requireThat(response.ok, `Read-only API observation failed (${response.status})`);
+            const result = await response.json();
+            requireThat(!result.errors, 'GraphQL observation failed');
+            return result;
+          };
+          const root = `/repos/${repo}`;
+          const repository = await api(root);
+          requireThat(repository.id === repoId && repository.full_name === repo, 'Immutable repository mismatch');
+          const pr = await api(`${root}/pulls/${inputs.pr_number}`);
+          requireThat(Number.isSafeInteger(pr.id) && pr.id > 0 && pr.number === Number(inputs.pr_number), 'PR identity mismatch');
+          requireThat(pr.state === 'open' && pr.draft === true, 'Candidate must remain open Draft');
+          requireThat(pr.base?.repo?.id === repoId && pr.head?.repo?.id === repoId && pr.base.repo.full_name === repo && pr.head.repo.full_name === repo, 'Same-repository candidate required');
+          requireThat(pr.base.ref === 'develop' && pr.base.sha === inputs.expected_base && pr.head.sha === inputs.expected_head, 'Candidate ref or SHA changed');
+          requireThat(typeof pr.head.ref === 'string' && pr.head.ref.startsWith('fix/') && pr.head.ref.length <= 255, 'Expected correction fix branch');
+          const parent = await api(`${root}/git/ref/heads/develop`);
+          const source = await api(`${root}/git/ref/heads/main`);
+          requireThat(parent.object?.sha === inputs.expected_base, 'Parent advanced');
+          requireThat(source.object?.sha === env.GITHUB_SHA, 'Trusted main source advanced');
+          const ancestry = await api(`${root}/compare/${inputs.expected_base}...${inputs.expected_head}`);
+          requireThat(['ahead', 'identical'].includes(ancestry.status) && ancestry.merge_base_commit?.sha === inputs.expected_base, 'Candidate must contain current develop');
+          const lifecycle = await api('/graphql', {
+            query: 'query($number:Int!){repository(owner:"glyad",name:"github-workspace-manager"){pullRequest(number:$number){id number createdAt isDraft state baseRefName baseRefOid headRefName headRefOid timelineItems(first:100,itemTypes:[CONVERT_TO_DRAFT_EVENT,READY_FOR_REVIEW_EVENT,HEAD_REF_FORCE_PUSHED_EVENT,BASE_REF_CHANGED_EVENT,CLOSED_EVENT,REOPENED_EVENT]){totalCount pageInfo{hasNextPage hasPreviousPage} nodes{__typename ... on Node{id}}}}}}',
+            variables: { number: Number(inputs.pr_number) },
+          });
+          const observedPr = lifecycle.data?.repository?.pullRequest;
+          requireThat(typeof pr.node_id === 'string' && pr.node_id.length > 0 && typeof pr.created_at === 'string' && Number.isFinite(Date.parse(pr.created_at)), 'Missing PR creation identity');
+          requireThat(observedPr?.id === pr.node_id && observedPr.number === pr.number && observedPr.createdAt === pr.created_at && observedPr.isDraft === true && observedPr.state === 'OPEN', 'Current Draft creation identity changed');
+          requireThat(observedPr.baseRefName === pr.base.ref && observedPr.baseRefOid === pr.base.sha && observedPr.headRefName === pr.head.ref && observedPr.headRefOid === pr.head.sha, 'Lifecycle candidate changed');
+          // GitHub totalCount may include events excluded by itemTypes; pageInfo proves filtered completeness.
+          const history = observedPr.timelineItems;
+          const allowedEvents = ['ConvertToDraftEvent', 'ReadyForReviewEvent', 'HeadRefForcePushedEvent', 'BaseRefChangedEvent', 'ClosedEvent', 'ReopenedEvent'];
+          requireThat(history && Number.isSafeInteger(history.totalCount) && history.totalCount >= 0 && history.pageInfo?.hasNextPage === false && history.pageInfo?.hasPreviousPage === false && Array.isArray(history.nodes) && history.nodes.length <= 100 && history.nodes.length <= history.totalCount, 'Incomplete lifecycle history');
+          requireThat(history.nodes.every((event) => typeof event.id === 'string' && event.id.length > 0 && allowedEvents.includes(event.__typename)) && new Set(history.nodes.map((event) => event.id)).size === history.nodes.length, 'Malformed lifecycle history');
+          // Creation and a fresh current-Draft observation also witness an initial Draft with no conversion event.
+          const witness = { prNodeId: observedPr.id, createdAt: observedPr.createdAt, events: history.nodes.map((event) => ({ id: event.id, type: event.__typename })) };
+          const workflow = await api(`${root}/actions/workflows/native-draft-preflight.yml`);
+          requireThat(Number.isSafeInteger(workflow.id) && workflow.path === path && workflow.state === 'active', 'Workflow identity mismatch');
+          const run = await api(`${root}/actions/runs/${env.GITHUB_RUN_ID}`);
+          const name = `draft-preflight|pr=${inputs.pr_number}|base=${inputs.expected_base}|head=${inputs.expected_head}|request=${inputs.request_id}`;
+          requireThat(run.id === Number(env.GITHUB_RUN_ID) && run.run_attempt === 1 && run.workflow_id === workflow.id && run.path === path, 'Run identity mismatch');
+          requireThat(run.event === 'workflow_dispatch' && run.head_branch === 'main' && run.head_sha === env.GITHUB_SHA && run.repository?.id === repoId, 'Run trusted source mismatch');
+          requireThat(run.actor?.login === 'glyad' && run.triggering_actor?.login === 'glyad' && run.display_title === name, 'Run request binding mismatch');
+          // Fail closed beyond one page: this short-lived bootstrap never silently truncates identity searches.
+          const runs = await api(`${root}/actions/workflows/${workflow.id}/runs?event=workflow_dispatch&per_page=100`);
+          requireThat(Number.isInteger(runs.total_count) && runs.total_count <= 100 && Array.isArray(runs.workflow_runs) && runs.workflow_runs.length === runs.total_count, 'Incomplete bounded run observation');
+          requireThat(runs.workflow_runs.filter((item) => item.display_title === name).length === 1, 'Duplicate request');
+          requireThat(!runs.workflow_runs.some((item) => item.id > run.id && item.display_title?.startsWith(`draft-preflight|pr=${inputs.pr_number}|`)), 'Superseded candidate cycle');
+          const tuple = { repositoryId: repoId, pr: pr.number, prId: pr.id, baseRef: 'develop', base: inputs.expected_base, headRef: pr.head.ref, head: inputs.expected_head, request: inputs.request_id, source: env.GITHUB_SHA, workflowId: workflow.id, run: run.id, attempt: 1, lifecycle: witness };
+          if (env.PHASE === 'current') requireThat(JSON.stringify(tuple) === env.CAPTURED, 'Captured candidate or lifecycle changed');
+          // Only bounded validated data crosses the job boundary. Candidate files/artifacts are never consulted.
+          appendFileSync(env.GITHUB_OUTPUT, `head=${tuple.head}\ntuple=${JSON.stringify(tuple)}\n`);
+          console.log(`Validated ${env.PHASE} for PR ${tuple.pr}, request ${tuple.request}, run ${tuple.run}/1`);
+          // END TRUSTED VALIDATOR
+          NODE
+  checks:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          repository: glyad/github-workspace-manager
+          ref: ${{ needs.prepare.outputs.head }}
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 24.19.0
+          package-manager-cache: false
+      - name: Select exact npm version
+        run: npm install --global npm@11.21.1 --ignore-scripts
+      - name: Run the complete suite on the captured head
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = 'v24.19.0'
+          test "$(npm --version)" = '11.21.1'
+          npm ci --ignore-scripts
+          npm run check:local
+  current:
+    needs: [prepare, checks]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    # A fresh runner observes GitHub without loading any candidate code or artifacts.
+    steps:
+      - name: Validate trusted dispatch and current Draft candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUTS: ${{ toJSON(inputs) }}
+          WORKFLOW_SHA: ${{ github.workflow_sha }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+          PHASE: current
+          CAPTURED: ${{ needs.prepare.outputs.tuple }}
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          CHECKS_RESULT: ${{ needs.checks.result }}
+        id: candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          // BEGIN TRUSTED VALIDATOR
+          import { appendFileSync } from 'node:fs';
+          const env = process.env;
+          const fail = (message) => { throw new Error(message); };
+          const requireThat = (value, message) => { if (!value) fail(message); };
+          const repo = 'glyad/github-workspace-manager';
+          const repoId = 1427426748;
+          const path = '.github/workflows/native-draft-preflight.yml';
+          const inputs = JSON.parse(env.INPUTS);
+          requireThat(Object.keys(inputs).sort().join(',') === 'expected_base,expected_head,pr_number,request_id', 'Unexpected inputs');
+          requireThat(/^[1-9][0-9]{0,8}$/.test(inputs.pr_number), 'Invalid PR number');
+          for (const key of ['expected_base', 'expected_head']) requireThat(/^[0-9a-f]{40}$/.test(inputs[key]), 'Invalid SHA');
+          requireThat(/^[A-Za-z0-9][A-Za-z0-9_-]{7,63}$/.test(inputs.request_id), 'Invalid request ID');
+          requireThat(env.GITHUB_REPOSITORY === repo && env.GITHUB_REPOSITORY_ID === String(repoId), 'Repository mismatch');
+          requireThat(env.GITHUB_EVENT_NAME === 'workflow_dispatch' && env.GITHUB_REF === 'refs/heads/main', 'Dispatch must use main');
+          requireThat(env.GITHUB_ACTOR === 'glyad' && env.GITHUB_TRIGGERING_ACTOR === 'glyad', 'Unauthorized actor');
+          requireThat(env.GITHUB_RUN_ATTEMPT === '1', 'Reruns require a fresh request');
+          requireThat(/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID), 'Invalid run ID');
+          requireThat(/^[0-9a-f]{40}$/.test(env.GITHUB_SHA) && env.WORKFLOW_SHA === env.GITHUB_SHA, 'Untrusted workflow source');
+          requireThat(env.WORKFLOW_REF === `${repo}/${path}@refs/heads/main`, 'Wrong workflow ref');
+          requireThat(['prepare', 'current'].includes(env.PHASE), 'Invalid phase');
+          if (env.PHASE === 'current') requireThat(env.PREPARE_RESULT === 'success' && env.CHECKS_RESULT === 'success', 'Actual prepare and checks jobs must succeed');
+          const api = async (endpoint, body) => {
+            const response = await fetch(`https://api.github.com${endpoint}`, {
+              method: body ? 'POST' : 'GET',
+              headers: { authorization: `Bearer ${env.GH_TOKEN}`, accept: 'application/vnd.github+json', 'x-github-api-version': '2022-11-28', ...(body ? { 'content-type': 'application/json' } : {}) },
+              ...(body ? { body: JSON.stringify(body) } : {}),
+            });
+            requireThat(response.ok, `Read-only API observation failed (${response.status})`);
+            const result = await response.json();
+            requireThat(!result.errors, 'GraphQL observation failed');
+            return result;
+          };
+          const root = `/repos/${repo}`;
+          const repository = await api(root);
+          requireThat(repository.id === repoId && repository.full_name === repo, 'Immutable repository mismatch');
+          const pr = await api(`${root}/pulls/${inputs.pr_number}`);
+          requireThat(Number.isSafeInteger(pr.id) && pr.id > 0 && pr.number === Number(inputs.pr_number), 'PR identity mismatch');
+          requireThat(pr.state === 'open' && pr.draft === true, 'Candidate must remain open Draft');
+          requireThat(pr.base?.repo?.id === repoId && pr.head?.repo?.id === repoId && pr.base.repo.full_name === repo && pr.head.repo.full_name === repo, 'Same-repository candidate required');
+          requireThat(pr.base.ref === 'develop' && pr.base.sha === inputs.expected_base && pr.head.sha === inputs.expected_head, 'Candidate ref or SHA changed');
+          requireThat(typeof pr.head.ref === 'string' && pr.head.ref.startsWith('fix/') && pr.head.ref.length <= 255, 'Expected correction fix branch');
+          const parent = await api(`${root}/git/ref/heads/develop`);
+          const source = await api(`${root}/git/ref/heads/main`);
+          requireThat(parent.object?.sha === inputs.expected_base, 'Parent advanced');
+          requireThat(source.object?.sha === env.GITHUB_SHA, 'Trusted main source advanced');
+          const ancestry = await api(`${root}/compare/${inputs.expected_base}...${inputs.expected_head}`);
+          requireThat(['ahead', 'identical'].includes(ancestry.status) && ancestry.merge_base_commit?.sha === inputs.expected_base, 'Candidate must contain current develop');
+          const lifecycle = await api('/graphql', {
+            query: 'query($number:Int!){repository(owner:"glyad",name:"github-workspace-manager"){pullRequest(number:$number){id number createdAt isDraft state baseRefName baseRefOid headRefName headRefOid timelineItems(first:100,itemTypes:[CONVERT_TO_DRAFT_EVENT,READY_FOR_REVIEW_EVENT,HEAD_REF_FORCE_PUSHED_EVENT,BASE_REF_CHANGED_EVENT,CLOSED_EVENT,REOPENED_EVENT]){totalCount pageInfo{hasNextPage hasPreviousPage} nodes{__typename ... on Node{id}}}}}}',
+            variables: { number: Number(inputs.pr_number) },
+          });
+          const observedPr = lifecycle.data?.repository?.pullRequest;
+          requireThat(typeof pr.node_id === 'string' && pr.node_id.length > 0 && typeof pr.created_at === 'string' && Number.isFinite(Date.parse(pr.created_at)), 'Missing PR creation identity');
+          requireThat(observedPr?.id === pr.node_id && observedPr.number === pr.number && observedPr.createdAt === pr.created_at && observedPr.isDraft === true && observedPr.state === 'OPEN', 'Current Draft creation identity changed');
+          requireThat(observedPr.baseRefName === pr.base.ref && observedPr.baseRefOid === pr.base.sha && observedPr.headRefName === pr.head.ref && observedPr.headRefOid === pr.head.sha, 'Lifecycle candidate changed');
+          // GitHub totalCount may include events excluded by itemTypes; pageInfo proves filtered completeness.
+          const history = observedPr.timelineItems;
+          const allowedEvents = ['ConvertToDraftEvent', 'ReadyForReviewEvent', 'HeadRefForcePushedEvent', 'BaseRefChangedEvent', 'ClosedEvent', 'ReopenedEvent'];
+          requireThat(history && Number.isSafeInteger(history.totalCount) && history.totalCount >= 0 && history.pageInfo?.hasNextPage === false && history.pageInfo?.hasPreviousPage === false && Array.isArray(history.nodes) && history.nodes.length <= 100 && history.nodes.length <= history.totalCount, 'Incomplete lifecycle history');
+          requireThat(history.nodes.every((event) => typeof event.id === 'string' && event.id.length > 0 && allowedEvents.includes(event.__typename)) && new Set(history.nodes.map((event) => event.id)).size === history.nodes.length, 'Malformed lifecycle history');
+          // Creation and a fresh current-Draft observation also witness an initial Draft with no conversion event.
+          const witness = { prNodeId: observedPr.id, createdAt: observedPr.createdAt, events: history.nodes.map((event) => ({ id: event.id, type: event.__typename })) };
+          const workflow = await api(`${root}/actions/workflows/native-draft-preflight.yml`);
+          requireThat(Number.isSafeInteger(workflow.id) && workflow.path === path && workflow.state === 'active', 'Workflow identity mismatch');
+          const run = await api(`${root}/actions/runs/${env.GITHUB_RUN_ID}`);
+          const name = `draft-preflight|pr=${inputs.pr_number}|base=${inputs.expected_base}|head=${inputs.expected_head}|request=${inputs.request_id}`;
+          requireThat(run.id === Number(env.GITHUB_RUN_ID) && run.run_attempt === 1 && run.workflow_id === workflow.id && run.path === path, 'Run identity mismatch');
+          requireThat(run.event === 'workflow_dispatch' && run.head_branch === 'main' && run.head_sha === env.GITHUB_SHA && run.repository?.id === repoId, 'Run trusted source mismatch');
+          requireThat(run.actor?.login === 'glyad' && run.triggering_actor?.login === 'glyad' && run.display_title === name, 'Run request binding mismatch');
+          // Fail closed beyond one page: this short-lived bootstrap never silently truncates identity searches.
+          const runs = await api(`${root}/actions/workflows/${workflow.id}/runs?event=workflow_dispatch&per_page=100`);
+          requireThat(Number.isInteger(runs.total_count) && runs.total_count <= 100 && Array.isArray(runs.workflow_runs) && runs.workflow_runs.length === runs.total_count, 'Incomplete bounded run observation');
+          requireThat(runs.workflow_runs.filter((item) => item.display_title === name).length === 1, 'Duplicate request');
+          requireThat(!runs.workflow_runs.some((item) => item.id > run.id && item.display_title?.startsWith(`draft-preflight|pr=${inputs.pr_number}|`)), 'Superseded candidate cycle');
+          const tuple = { repositoryId: repoId, pr: pr.number, prId: pr.id, baseRef: 'develop', base: inputs.expected_base, headRef: pr.head.ref, head: inputs.expected_head, request: inputs.request_id, source: env.GITHUB_SHA, workflowId: workflow.id, run: run.id, attempt: 1, lifecycle: witness };
+          if (env.PHASE === 'current') requireThat(JSON.stringify(tuple) === env.CAPTURED, 'Captured candidate or lifecycle changed');
+          // Only bounded validated data crosses the job boundary. Candidate files/artifacts are never consulted.
+          appendFileSync(env.GITHUB_OUTPUT, `head=${tuple.head}\ntuple=${JSON.stringify(tuple)}\n`);
+          console.log(`Validated ${env.PHASE} for PR ${tuple.pr}, request ${tuple.request}, run ${tuple.run}/1`);
+          // END TRUSTED VALIDATOR
+          NODE
