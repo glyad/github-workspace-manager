@@ -1,4 +1,4 @@
-# Task 1 dependency verification
+# Product dependency verification
 
 Verified 2026-10-28 against the official npm registry. Exact direct versions and transitive integrity hashes are locked in `package-lock.json`.
 
@@ -6,6 +6,7 @@ Verified 2026-10-28 against the official npm registry. Exact direct versions and
 
 - [Selected packages](#selected-packages)
 - [Runtime and dependency boundaries](#runtime-and-dependency-boundaries)
+- [Configuration parser](#configuration-parser)
 - [Deferred packages](#deferred-packages)
 
 ## Selected packages
@@ -28,6 +29,16 @@ Domain code imports only its own portable modules and the two explicit noble SHA
 
 Canonical JSON sorts object keys by UTF-16 code units, preserves string contents and array order, uses JSON number spelling (including zero for negative zero), rejects non-finite numbers and non-JSON values, and hashes UTF-8 bytes. SHA-256 is checked against Node's independent implementation in tests. Repository identity accepts bounded ASCII DNS/owner/repository spellings and lowercases only those remote coordinates. Unsupported non-ASCII spellings fail without transliteration; display values and local execution paths remain unchanged. IDNA conversion and local path normalization are not performed by this remote-coordinate function.
 
+## Configuration parser
+
+Task 2 verified `yaml` **2.9.1** on 2026-10-29 through the [official registry metadata](https://registry.npmjs.org/yaml/2.9.1) (`npm view yaml version engines dist.integrity --json`). Its declared Node engine is `>=14.6`, compatible with the pinned Node 24.19.0. The exact workspace dependency and integrity are locked; installation used `npm install --ignore-scripts` and reported zero vulnerabilities. Existing dependencies were preserved.
+
+The [official YAML 2 documentation](https://eemeli.org/yaml/) establishes `parseDocument`, strict duplicate-key detection, node type guards, document errors/warnings and schema options. Parsing lives in the local adapter; domain validates the resulting JSON and application resolves provenance without importing the parser. No Ajv dependency is needed for the current small closed envelope; runtime validation reuses the existing execution/resource codecs and validates configuration independently.
+
+The parser accepts one YAML 1.2 core document, at most 256 KiB of UTF-8, 10,000 nodes and depth 32. It rejects aliases entirely before expansion, duplicate keys, merge keys, non-string mapping keys, unknown/custom tags, non-finite numbers and prototype-shaped keys. These are parser safety bounds, not invented retention defaults. Source paths are relative repository file paths with no traversal, absolute paths or backslashes. Source authority/trust is injected metadata, and document attempts to provide it fail `UNTRUSTED_POLICY`. The committed reader requires the injected port's returned revision to equal the pinned revision; runtime's actual ref-to-revision binding remains Task 23's responsibility.
+
+GitHub restrictions in the current `Record<FieldPath, Json>` interface represent exact required values. They constrain managed intent without making omitted fields managed. Trusted organization-enforced intents override advisory/profile recommendations; explicit repository choices conflicting with an enforced intent fail. Equal-rank conflicts fail rather than depending on input order. Component-specific field ownership/semantics belong to Task 3's registry; this envelope rejects unknown structural/intent members and execution preferences without pretending that future component schemas already exist.
+
 ## Deferred packages
 
-YAML, Ajv, Octokit, React, browser tooling and MCP SDKs are not installed for this slice. Verify their maintained releases, engines and actual supported APIs in the task that first consumes them. No paid API or live repository mutation is used by product tests.
+Ajv, Octokit, React, browser tooling and MCP SDKs are not installed for this slice. Verify their maintained releases, engines and actual supported APIs in the task that first consumes them. No paid API or live repository mutation is used by product tests.

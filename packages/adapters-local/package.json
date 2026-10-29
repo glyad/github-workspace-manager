@@ -1,0 +1,14 @@
+{
+  "name": "@github-workspace-manager/adapters-local",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@github-workspace-manager/domain": "0.1.0",
+    "@github-workspace-manager/application": "0.1.0",
+    "yaml": "2.9.1"
+  }
+}
